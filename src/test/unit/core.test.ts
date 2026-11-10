@@ -63,3 +63,67 @@ test("scanner falls back to default shots and reads pulla playlists", () => {
   assert.equal(calls[1].shots, 1024);
   assert.equal(calls[1].shotsKnown, false);
 });
+
+import { countStats, countsToCsv, hellingerFidelity, totalVariationDistance } from "../../core/stats";
+
+test("count statistics of a Bell state", () => {
+  const s = countStats({ "00": 500, "11": 500 });
+  assert.equal(s.shots, 1000);
+  assert.equal(s.numBits, 2);
+  close(s.entropy, 1);
+  close(s.parity, 1);
+  close(s.marginals[0].p1, 0.5);
+  close(s.marginals[1].z, 0);
+  close(s.correlations[0].zz, 1);
+  close(s.correlations[0].connected, 1);
+});
+
+test("marginals follow Qiskit bit order and correlations vanish for product states", () => {
+  // c0 always 1, c1 uniform
+  const s = countStats({ "01": 250, "11": 250 });
+  close(s.marginals[0].p1, 1);
+  close(s.marginals[1].p1, 0.5);
+  close(s.correlations[0].connected, 0);
+  close(s.parity, 0);
+});
+
+test("Hellinger fidelity and TVD match their definitions", () => {
+  close(hellingerFidelity({ "00": 500, "11": 500 }, { "00": 0.5, "11": 0.5 }), 1);
+  close(hellingerFidelity({ "0": 1 }, { "1": 1 }), 0);
+  close(hellingerFidelity({ "0": 1 }, { "0": 1, "1": 1 }), 0.5);
+  close(totalVariationDistance({ "0": 1 }, { "0": 1, "1": 1 }), 0.5);
+  close(totalVariationDistance({ "0 1": 2 }, { "01": 5 }), 0);
+});
+
+test("CSV keeps leading zeros and has per-bit columns", () => {
+  const csv = countsToCsv("42", [{ "01": 3, "10": 1 }])
+    .trim()
+    .split("\n");
+  assert.equal(csv[0], "job,circuit,outcome,outcome_int,count,probability,c0,c1");
+  assert.equal(csv[1], "42,0,|01⟩,1,3,0.750000,1,0");
+  assert.equal(csv[2], "42,0,|10⟩,2,1,0.250000,0,1");
+});
+
+import { buildAnalysisNotebook } from "../../core/notebook";
+
+test("analysis notebook is valid nbformat and includes optional sections on demand", () => {
+  const base = {
+    directory: 'C:\\results\\42 "x"',
+    jobId: "42",
+    jobName: "bell",
+    backend: "VLQ",
+    project: "p",
+    hasShots: false,
+    hasCircuits: false,
+  };
+  const nb = JSON.parse(buildAnalysisNotebook(base));
+  assert.equal(nb.nbformat, 4);
+  const code = nb.cells
+    .filter((c: { cell_type: string }) => c.cell_type === "code")
+    .map((c: { source: string }) => c.source);
+  assert.ok(code[0].includes('RESULTS = Path("C:\\\\results\\\\42 \\"x\\"")'), code[0]);
+  assert.ok(!code.join().includes("shots.csv"));
+  const full = JSON.parse(buildAnalysisNotebook({ ...base, hasShots: true, hasCircuits: true }));
+  const all = full.cells.map((c: { source: string }) => c.source).join("\n");
+  assert.ok(all.includes("shots.csv") && all.includes("hellinger_fidelity"));
+});

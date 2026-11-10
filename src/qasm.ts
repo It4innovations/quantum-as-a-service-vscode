@@ -28,6 +28,8 @@ interface SubmitResult {
 }
 
 export const TRANSPILED_SCHEME = "qaas-transpiled";
+/** Sources up to this size are kept with the job record. */
+const MAX_STORED_SOURCE = 200_000;
 
 /** Read-only documents holding transpiled QASM for the diff view. */
 export class TranspiledContentProvider implements vscode.TextDocumentContentProvider {
@@ -215,16 +217,11 @@ export class QasmCommands {
         return;
       }
     }
+    const sources = docs.map((d) => d.getText());
     try {
       const res = await vscode.window.withProgress(
         { location: vscode.ProgressLocation.Notification, title: `QaaS: submitting "${jobName}"…`, cancellable: true },
-        (_p, token) =>
-          this.bridge.call<SubmitResult>(
-            "submit",
-            target,
-            { sources: docs.map((d) => d.getText()), shots, jobName },
-            token,
-          ),
+        (_p, token) => this.bridge.call<SubmitResult>("submit", target, { sources, shots, jobName }, token),
       );
       await this.jobs.track({
         jobId: res.jobId,
@@ -239,6 +236,7 @@ export class QasmCommands {
         calibrationSetId: res.calibrationSetId,
         source: docs.map((d) => vscode.workspace.asRelativePath(d.uri)).join(", "),
         estimate: { low: est.low, high: est.high },
+        qasmSources: sources.join("").length <= MAX_STORED_SOURCE ? sources : undefined,
         origin: "extension",
       });
       vscode.window.showInformationMessage(`QaaS: submitted job #${res.jobId} (est. ${formatRange(est)} billed).`);

@@ -207,6 +207,18 @@
         "command": "qaas.jobs.remove",
         "title": "Remove from List",
         "category": "QaaS"
+      },
+      {
+        "command": "qaas.jobs.openDataWrangler",
+        "title": "Open Results in Data Wrangler",
+        "category": "QaaS",
+        "icon": "$(table)"
+      },
+      {
+        "command": "qaas.jobs.openNotebook",
+        "title": "Open Analysis Notebook",
+        "category": "QaaS",
+        "icon": "$(notebook)"
       }
     ],
     "menus": {
@@ -237,6 +249,14 @@
         },
         {
           "command": "qaas.jobs.remove",
+          "when": "false"
+        },
+        {
+          "command": "qaas.jobs.openDataWrangler",
+          "when": "false"
+        },
+        {
+          "command": "qaas.jobs.openNotebook",
           "when": "false"
         }
       ],
@@ -331,6 +351,16 @@
           "command": "qaas.jobs.remove",
           "when": "view == qaas.jobs",
           "group": "2_manage@3"
+        },
+        {
+          "command": "qaas.jobs.openDataWrangler",
+          "when": "view == qaas.jobs && viewItem =~ /\\bdownloaded\\b/",
+          "group": "1_results@5"
+        },
+        {
+          "command": "qaas.jobs.openNotebook",
+          "when": "view == qaas.jobs && viewItem =~ /\\bdownloaded\\b/",
+          "group": "1_results@6"
         }
       ]
     },
