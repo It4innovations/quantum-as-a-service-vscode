@@ -36,7 +36,6 @@ Status: ✅ available and tested · 🔶 available, not yet verified against liv
 | Transpile for VLQ: diff of original vs. transpiled QASM, depth / 2-qubit gates / layout | 🔶 | `Transpile` above the file or in the editor title |
 | Run on VLQ, with shots prompt and billed-time estimate before submitting | 🔶 | Several `.qasm` files selected in the explorer are sent as one job |
 | `input` parameters with value prompts and sweeps | 🗓️ | |
-| Ideal simulation side by side with hardware results, Hellinger fidelity | 🗓️ | |
 
 ### Python scripts and notebooks
 
@@ -57,13 +56,20 @@ Status: ✅ available and tested · 🔶 available, not yet verified against liv
 | Cancel, copy ID, remove from list | 🔶 | |
 | Notification when a job finishes; optional automatic download | 🔶 | |
 
-### Results
+### Results and analysis
 
 | Feature | Status | Notes |
 | --- | --- | --- |
-| Download results to a configurable path (`qaas.resultsDirectory`) or a folder you pick | 🔶 | Writes `counts.json`, `raw_artifacts.json`, `job.json`; per-shot measurements optional |
-| Histogram view per circuit | ✅ | |
+| Download results to a configurable path (`qaas.resultsDirectory`) or a folder you pick | 🔶 | Writes `counts.json`, `counts.csv`, `raw_artifacts.json`, `job.json`; `shots.csv` with per-shot measurements (`qaas.downloadMeasurements`) |
 | Download several selected jobs at once | 🔶 | |
+| Results view: histogram, shots, distinct outcomes, entropy, most frequent outcome, parity ⟨Z…Z⟩ | ✅ | One section per circuit |
+| Per-bit P(1) and ⟨Z⟩ | ✅ | |
+| Pairwise correlations (connected ⟨ZᵢZⱼ⟩ − ⟨Zᵢ⟩⟨Zⱼ⟩) as a heatmap | ✅ | Up to 16 bits; larger registers in Data Wrangler or the notebook |
+| Compare with the ideal simulation: Hellinger fidelity, total variation distance, overlaid histogram | ✅ | Exact statevector probabilities of the submitted OpenQASM 3 circuits (up to 24 qubits, final measurements only) |
+| Compare with another downloaded job | ✅ | E.g. the same circuit on another calibration set |
+| Tidy CSV export for other tools | ✅ | Outcomes as `\|0011⟩` so leading zeros survive type inference, plus one 0/1 column per bit (`c0` = rightmost) |
+| Open results in [Data Wrangler](https://marketplace.visualstudio.com/items?itemName=ms-toolsai.datawrangler) | ✅ | Optional; offers to install it. Column statistics of `c0…cN` give per-bit probabilities |
+| Analysis notebook (`analysis.ipynb`) next to the results | ✅ | pandas + matplotlib: summary, per-bit statistics, correlations, histogram, per-shot data, ideal comparison. Never overwritten once created |
 
 ### Billing estimate
 

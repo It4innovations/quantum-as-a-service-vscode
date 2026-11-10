@@ -1,10 +1,12 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as vscode from "vscode";
+import { Analysis } from "./analysis";
 import type { Bridge } from "./bridge";
 import { cfg, currentTarget, expandPath, sanitize, type Target, TOKEN_KEY } from "./config";
 import { formatSeconds } from "./core/estimate";
-import { showResultsPanel } from "./resultsPanel";
+import type { Counts } from "./core/stats";
+import { ResultsPanel } from "./resultsPanel";
 
 export const TERMINAL = new Set(["FINISHED", "FAILED", "CANCELED", "CANCELLED"]);
 
@@ -25,6 +27,8 @@ export interface JobRecord {
   /** Billed-time estimate in seconds at submission. */
   estimate?: { low: number; high: number };
   downloadedTo?: string;
+  /** OpenQASM sources as submitted (kept when small), for ideal simulation and re-runs. */
+  qasmSources?: string[];
   origin: "extension" | "imported";
 }
 
@@ -155,6 +159,7 @@ interface DownloadResult {
 
 export class JobManager implements vscode.Disposable {
   private timer?: NodeJS.Timeout;
+  readonly analysis: Analysis;
   private polling = false;
 
   constructor(
@@ -163,6 +168,7 @@ export class JobManager implements vscode.Disposable {
     private readonly secrets: vscode.SecretStorage,
     private readonly output: vscode.OutputChannel,
   ) {
+    this.analysis = new Analysis(bridge, store);
     this.schedule();
   }
 
@@ -252,7 +258,12 @@ export class JobManager implements vscode.Disposable {
     return expandPath(template, { jobId: r.jobId, jobName: sanitize(r.name || "job"), project: sanitize(r.project) });
   }
 
-  async download(r: JobRecord, directory = this.defaultDirectory(r)): Promise<JobRecord | undefined> {
+  /** Download results; with openAfter the results view opens directly instead of a notification. */
+  async download(
+    r: JobRecord,
+    directory = this.defaultDirectory(r),
+    openAfter = false,
+  ): Promise<JobRecord | undefined> {
     try {
       const res = await vscode.window.withProgress(
         {
@@ -269,13 +280,22 @@ export class JobManager implements vscode.Disposable {
           ),
       );
       const next = await this.store.update(r, { downloadedTo: res.directory, state: "FINISHED" });
+      try {
+        await this.analysis.writeExports(next, res.counts);
+      } catch (e) {
+        this.output.appendLine(`[jobs] CSV export for ${r.jobId} failed: ${(e as Error).message}`);
+      }
+      if (openAfter) {
+        this.openResults(next, res.counts);
+        return next;
+      }
       const choice = await vscode.window.showInformationMessage(
         `QaaS: results saved to ${res.directory}`,
         "Show Results",
         "Reveal Folder",
       );
       if (choice === "Show Results") {
-        showResultsPanel(next, res.counts);
+        this.openResults(next, res.counts);
       } else if (choice === "Reveal Folder") {
         void vscode.commands.executeCommand("revealFileInOS", vscode.Uri.file(path.join(res.directory, "counts.json")));
       }
@@ -284,6 +304,10 @@ export class JobManager implements vscode.Disposable {
       vscode.window.showErrorMessage(`QaaS: download of #${r.jobId} failed: ${(e as Error).message}`);
       return undefined;
     }
+  }
+
+  openResults(r: JobRecord, counts: Counts[]): void {
+    ResultsPanel.show(r, counts, this.analysis);
   }
 
   async downloadTo(recs: JobRecord[]): Promise<void> {
@@ -306,13 +330,13 @@ export class JobManager implements vscode.Disposable {
     if (r.downloadedTo) {
       try {
         const text = await fs.readFile(path.join(r.downloadedTo, "counts.json"), "utf8");
-        showResultsPanel(r, JSON.parse(text));
+        this.openResults(r, JSON.parse(text));
         return;
       } catch {
         // file moved or deleted: download again
       }
     }
-    await this.download(r);
+    await this.download(r, undefined, true);
   }
 
   async cancel(r: JobRecord): Promise<void> {

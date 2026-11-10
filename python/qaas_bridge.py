@@ -14,6 +14,7 @@ stderr (shown in the "QaaS" output channel) and nothing can read the protocol st
 from __future__ import annotations
 
 import contextlib
+import csv
 import json
 import os
 import re
@@ -25,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 MIN_QAAS = (1, 0, 0)
+MAX_SIM_QUBITS = 24
 TERMINAL_STATES = {"FINISHED", "FAILED", "CANCELED", "CANCELLED"}
 
 
@@ -66,6 +68,27 @@ def _attr(obj: Any, dotted: str) -> Any:
         return obj
     except Exception:
         return None
+
+
+def _write_shots_csv(path: Path, job_id: str, result, circuits: int) -> None:
+    """One row per shot, with the outcome in ket form and one 0/1 column per classical bit."""
+    memories = [[m.replace(" ", "") for m in result.get_memory(i)] for i in range(circuits)]
+    width = max((len(m) for mem in memories for m in mem), default=0)
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["job", "circuit", "shot", "outcome", *[f"c{i}" for i in range(width)]])
+        for circuit, mem in enumerate(memories):
+            for shot, bits in enumerate(mem):
+                bits = bits.zfill(width)
+                writer.writerow(
+                    [
+                        job_id,
+                        circuit,
+                        shot,
+                        f"|{bits}⟩",
+                        *[bits[width - 1 - i] for i in range(width)],
+                    ]
+                )
 
 
 def _circuit_stats(qc) -> dict:
@@ -289,7 +312,63 @@ class Server:
         }
         for name, content in files.items():
             (directory / name).write_text(json.dumps(content, indent=2, default=str))
-        return {"directory": str(directory), "files": list(files), "counts": counts}
+        written = list(files)
+        if with_meas:
+            _write_shots_csv(directory / "shots.csv", p["jobId"], result, len(counts))
+            written.append("shots.csv")
+        return {"directory": str(directory), "files": written, "counts": counts}
+
+    def simulate(self, p: dict) -> list[dict[str, float]]:
+        """Exact outcome probabilities of OpenQASM 3 circuits (ideal, noiseless).
+
+        Supports unitary circuits with final measurements. Keys use Qiskit bit order
+        (rightmost = classical bit 0); unmeasured classical bits are 0.
+        """
+        from qiskit import QuantumCircuit, qasm3
+        from qiskit.quantum_info import Statevector
+
+        out = []
+        for index, src in enumerate(p["sources"]):
+            try:
+                qc = qasm3.loads(src)
+            except Exception as exc:
+                raise BridgeError(f"Circuit {index}: OpenQASM 3 parse error: {exc}") from exc
+            if qc.num_qubits > MAX_SIM_QUBITS:
+                raise BridgeError(
+                    f"Circuit {index} has {qc.num_qubits} qubits; ideal simulation is limited "
+                    f"to {MAX_SIM_QUBITS}."
+                )
+            if qc.num_parameters:
+                raise BridgeError(f"Circuit {index} has unbound parameters.")
+            body = QuantumCircuit(qc.num_qubits)
+            measured: dict[int, int] = {}  # clbit -> qubit
+            for inst in qc.data:
+                name = inst.operation.name
+                qubits = [qc.find_bit(q).index for q in inst.qubits]
+                if name == "measure":
+                    measured[qc.find_bit(inst.clbits[0]).index] = qubits[0]
+                elif name == "barrier":
+                    continue
+                elif inst.clbits or name == "reset" or set(qubits) & set(measured.values()):
+                    raise BridgeError(
+                        f"Circuit {index}: ideal simulation supports only unitary circuits with "
+                        f"final measurements (found '{name}' after or with classical bits)."
+                    )
+                else:
+                    body.append(inst.operation, qubits)
+            clbits = sorted(measured)
+            probs = Statevector(body).probabilities_dict(qargs=[measured[c] for c in clbits])
+            dist: dict[str, float] = {}
+            for key, prob in probs.items():
+                if prob < 1e-12:
+                    continue
+                bits = ["0"] * qc.num_clbits  # index = classical bit
+                for k, c in enumerate(clbits):
+                    bits[c] = key[len(key) - 1 - k]
+                outcome = "".join(reversed(bits))
+                dist[outcome] = dist.get(outcome, 0.0) + float(prob)
+            out.append(dist)
+        return out
 
 
 def serve() -> int:

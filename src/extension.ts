@@ -297,6 +297,8 @@ export function activate(context: vscode.ExtensionContext): void {
         );
       }
     }),
+    vscode.commands.registerCommand("qaas.jobs.openDataWrangler", (r: JobRecord) => jobs.analysis.openDataWrangler(r)),
+    vscode.commands.registerCommand("qaas.jobs.openNotebook", (r: JobRecord) => jobs.analysis.openNotebook(r)),
     vscode.commands.registerCommand("qaas.jobs.cancel", (r: JobRecord) => jobs.cancel(r)),
     vscode.commands.registerCommand("qaas.jobs.copyId", (r: JobRecord) => vscode.env.clipboard.writeText(r.jobId)),
     vscode.commands.registerCommand("qaas.jobs.remove", async (r?: JobRecord, rs?: JobRecord[]) => {
