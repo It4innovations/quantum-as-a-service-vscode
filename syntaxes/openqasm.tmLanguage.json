@@ -1,0 +1,37 @@
+{
+  "scopeName": "source.openqasm",
+  "name": "OpenQASM",
+  "patterns": [
+    { "include": "#comments" },
+    { "name": "string.quoted.double.openqasm", "begin": "\"", "end": "\"" },
+    { "name": "keyword.other.version.openqasm", "match": "\\bOPENQASM\\b" },
+    {
+      "name": "keyword.control.openqasm",
+      "match": "\\b(if|else|for|while|in|break|continue|return|end|switch|case|default)\\b"
+    },
+    {
+      "name": "keyword.other.openqasm",
+      "match": "\\b(include|gate|def|defcal|defcalgrammar|cal|extern|box|barrier|measure|reset|delay|let|const|input|output|ctrl|negctrl|inv|pow|gphase|durationof|pragma)\\b"
+    },
+    {
+      "name": "storage.type.openqasm",
+      "match": "\\b(qubit|qreg|bit|creg|bool|int|uint|float|angle|complex|duration|stretch|array|port|frame|waveform)\\b"
+    },
+    {
+      "name": "support.function.gate.openqasm",
+      "match": "\\b(U|CX|u|u1|u2|u3|p|phase|x|y|z|h|s|sdg|t|tdg|sx|rx|ry|rz|cx|cy|cz|ch|cp|crx|cry|crz|cu|swap|ccx|cswap|id|prx)\\b"
+    },
+    { "name": "constant.language.openqasm", "match": "\\b(pi|π|tau|τ|euler|ℇ|true|false)\\b" },
+    { "name": "constant.numeric.openqasm", "match": "\\b\\d+(\\.\\d*)?([eE][+-]?\\d+)?(dt|ns|us|µs|ms|s|im)?\\b" },
+    { "name": "entity.name.function.openqasm", "match": "(?<=\\b(gate|def|defcal)\\s+)[A-Za-z_]\\w*" },
+    { "name": "keyword.operator.openqasm", "match": "->|==|!=|<=|>=|&&|\\|\\||[+\\-*/%^&|~!<>=@]" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "name": "comment.line.double-slash.openqasm", "match": "//.*$" },
+        { "name": "comment.block.openqasm", "begin": "/\\*", "end": "\\*/" }
+      ]
+    }
+  }
+}

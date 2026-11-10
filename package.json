@@ -1,7 +1,7 @@
 {
   "name": "qaas-vscode",
   "displayName": "Quantum-as-a-Service (QHEAppE)",
-  "description": "Run Qiskit circuits on the VLQ quantum computer through LEXIS and HEAppE using the qaas Python package.",
+  "description": "Run OpenQASM 3 and Qiskit circuits on the VLQ quantum computer through LEXIS and HEAppE: job manager, result downloads, billed-time estimates.",
   "version": "0.0.1",
   "publisher": "it4innovations",
   "license": "Apache-2.0",
@@ -23,9 +23,59 @@
     "LEXIS",
     "HEAppE"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./out/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "qaas",
+          "title": "Quantum (QaaS)",
+          "icon": "media/qaas.svg"
+        }
+      ]
+    },
+    "views": {
+      "qaas": [
+        {
+          "id": "qaas.jobs",
+          "name": "Jobs"
+        },
+        {
+          "id": "qaas.estimator",
+          "name": "Billing Estimator",
+          "type": "webview"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "qaas.jobs",
+        "contents": "No jobs yet.\n[New OpenQASM 3 Circuit](command:qaas.newQasmFile)\n[Import Jobs from HEAppE](command:qaas.jobs.import)\nSubmitted jobs are kept across restarts."
+      }
+    ],
+    "languages": [
+      {
+        "id": "openqasm",
+        "aliases": [
+          "OpenQASM",
+          "qasm"
+        ],
+        "extensions": [
+          ".qasm"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "openqasm",
+        "scopeName": "source.openqasm",
+        "path": "./syntaxes/openqasm.tmLanguage.json"
+      }
+    ],
     "commands": [
       {
         "command": "qaas.checkEnvironment",
@@ -33,8 +83,23 @@
         "category": "QaaS"
       },
       {
+        "command": "qaas.selectInterpreter",
+        "title": "Select Python Interpreter",
+        "category": "QaaS"
+      },
+      {
+        "command": "qaas.createEnvironment",
+        "title": "Create Python Environment for qaas",
+        "category": "QaaS"
+      },
+      {
         "command": "qaas.installPackage",
-        "title": "Install qaas Package",
+        "title": "Install or Upgrade qaas",
+        "category": "QaaS"
+      },
+      {
+        "command": "qaas.restartBridge",
+        "title": "Restart Python Bridge",
         "category": "QaaS"
       },
       {
@@ -44,31 +109,228 @@
       },
       {
         "command": "qaas.clearToken",
-        "title": "Clear LEXIS Token",
+        "title": "Clear LEXIS Token and Log Out",
         "category": "QaaS"
       },
       {
         "command": "qaas.listBackends",
-        "title": "List Available Backends",
+        "title": "Choose Backend",
         "category": "QaaS"
       },
       {
         "command": "qaas.newCircuitFile",
-        "title": "New VLQ Circuit File",
+        "title": "New Qiskit Circuit File",
+        "category": "QaaS"
+      },
+      {
+        "command": "qaas.newQasmFile",
+        "title": "New OpenQASM 3 Circuit",
         "category": "QaaS"
       },
       {
         "command": "qaas.runCurrentFile",
-        "title": "Run Current File on VLQ",
+        "title": "Run Python File on VLQ",
         "category": "QaaS",
         "icon": "$(play)"
+      },
+      {
+        "command": "qaas.runQasm",
+        "title": "Run on VLQ",
+        "category": "QaaS",
+        "icon": "$(play)"
+      },
+      {
+        "command": "qaas.transpileQasm",
+        "title": "Transpile for VLQ",
+        "category": "QaaS",
+        "icon": "$(git-compare)"
+      },
+      {
+        "command": "qaas.openEstimator",
+        "title": "Open Billing Estimator",
+        "category": "QaaS",
+        "icon": "$(watch)"
+      },
+      {
+        "command": "qaas.jobs.refresh",
+        "title": "Refresh Job Status",
+        "category": "QaaS",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "qaas.jobs.import",
+        "title": "Import Jobs from HEAppE",
+        "category": "QaaS",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "qaas.jobs.clearFinished",
+        "title": "Remove Finished Jobs from List",
+        "category": "QaaS",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "qaas.jobs.showResults",
+        "title": "Show Results",
+        "category": "QaaS",
+        "icon": "$(graph)"
+      },
+      {
+        "command": "qaas.jobs.download",
+        "title": "Download Results",
+        "category": "QaaS",
+        "icon": "$(desktop-download)"
+      },
+      {
+        "command": "qaas.jobs.downloadTo",
+        "title": "Download Results To…",
+        "category": "QaaS"
+      },
+      {
+        "command": "qaas.jobs.openFolder",
+        "title": "Reveal Results Folder",
+        "category": "QaaS",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "qaas.jobs.cancel",
+        "title": "Cancel Job",
+        "category": "QaaS",
+        "icon": "$(stop-circle)"
+      },
+      {
+        "command": "qaas.jobs.copyId",
+        "title": "Copy Job ID",
+        "category": "QaaS"
+      },
+      {
+        "command": "qaas.jobs.remove",
+        "title": "Remove from List",
+        "category": "QaaS"
       }
     ],
     "menus": {
+      "commandPalette": [
+        {
+          "command": "qaas.jobs.showResults",
+          "when": "false"
+        },
+        {
+          "command": "qaas.jobs.download",
+          "when": "false"
+        },
+        {
+          "command": "qaas.jobs.downloadTo",
+          "when": "false"
+        },
+        {
+          "command": "qaas.jobs.openFolder",
+          "when": "false"
+        },
+        {
+          "command": "qaas.jobs.cancel",
+          "when": "false"
+        },
+        {
+          "command": "qaas.jobs.copyId",
+          "when": "false"
+        },
+        {
+          "command": "qaas.jobs.remove",
+          "when": "false"
+        }
+      ],
       "editor/title/run": [
         {
           "command": "qaas.runCurrentFile",
           "when": "resourceLangId == python"
+        },
+        {
+          "command": "qaas.runQasm",
+          "when": "resourceLangId == openqasm || resourceExtname == .qasm"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "qaas.transpileQasm",
+          "when": "resourceLangId == openqasm || resourceExtname == .qasm",
+          "group": "navigation"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "qaas.runQasm",
+          "when": "resourceExtname == .qasm",
+          "group": "qaas"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "qaas.jobs.refresh",
+          "when": "view == qaas.jobs",
+          "group": "navigation@1"
+        },
+        {
+          "command": "qaas.jobs.import",
+          "when": "view == qaas.jobs",
+          "group": "navigation@2"
+        },
+        {
+          "command": "qaas.jobs.clearFinished",
+          "when": "view == qaas.jobs",
+          "group": "navigation@3"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "qaas.jobs.showResults",
+          "when": "view == qaas.jobs && viewItem =~ /\\bfinished\\b/",
+          "group": "inline@1"
+        },
+        {
+          "command": "qaas.jobs.download",
+          "when": "view == qaas.jobs && viewItem =~ /\\bfinished\\b/",
+          "group": "inline@2"
+        },
+        {
+          "command": "qaas.jobs.cancel",
+          "when": "view == qaas.jobs && viewItem =~ /\\bactive\\b/",
+          "group": "inline@3"
+        },
+        {
+          "command": "qaas.jobs.showResults",
+          "when": "view == qaas.jobs && viewItem =~ /\\bfinished\\b/",
+          "group": "1_results@1"
+        },
+        {
+          "command": "qaas.jobs.download",
+          "when": "view == qaas.jobs && viewItem =~ /\\bfinished\\b/",
+          "group": "1_results@2"
+        },
+        {
+          "command": "qaas.jobs.downloadTo",
+          "when": "view == qaas.jobs && viewItem =~ /\\bfinished\\b/",
+          "group": "1_results@3"
+        },
+        {
+          "command": "qaas.jobs.openFolder",
+          "when": "view == qaas.jobs && viewItem =~ /\\bdownloaded\\b/",
+          "group": "1_results@4"
+        },
+        {
+          "command": "qaas.jobs.cancel",
+          "when": "view == qaas.jobs && viewItem =~ /\\bactive\\b/",
+          "group": "2_manage@1"
+        },
+        {
+          "command": "qaas.jobs.copyId",
+          "when": "view == qaas.jobs",
+          "group": "2_manage@2"
+        },
+        {
+          "command": "qaas.jobs.remove",
+          "when": "view == qaas.jobs",
+          "group": "2_manage@3"
         }
       ]
     },
@@ -78,22 +340,13 @@
         "qaas.pythonPath": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Python interpreter with `qaas` installed. Leave empty to use the interpreter selected in the Python extension, then `python3`."
+          "scope": "resource",
+          "markdownDescription": "Python 3.12 interpreter with `qaas` (venv, conda or pyenv). Use **QaaS: Select Python Interpreter**. Empty uses the Python extension's selection, then `python3`."
         },
-        "qaas.lexisProject": {
+        "qaas.condaPath": {
           "type": "string",
           "default": "",
-          "description": "LEXIS project identifier."
-        },
-        "qaas.lexisResource": {
-          "type": "string",
-          "default": "",
-          "description": "LEXIS resource name. Leave empty to let the client choose."
-        },
-        "qaas.backendName": {
-          "type": "string",
-          "default": "VLQ",
-          "description": "Quantum backend name."
+          "markdownDescription": "Path to `conda` when it is not found automatically."
         },
         "qaas.packageExtra": {
           "type": "string",
@@ -103,29 +356,104 @@
             "iqm35_qiskit"
           ],
           "default": "iqm_qiskit",
-          "description": "Which IQM extra to install with qaas (see the qaas compatibility table)."
+          "description": "IQM extra installed with qaas (see the qaas compatibility table)."
+        },
+        "qaas.lexisProject": {
+          "type": "string",
+          "default": "",
+          "description": "LEXIS project identifier."
+        },
+        "qaas.lexisResource": {
+          "type": "string",
+          "default": "",
+          "description": "LEXIS resource name. Empty lets the client choose."
+        },
+        "qaas.backendName": {
+          "type": "string",
+          "default": "VLQ",
+          "description": "Quantum backend name."
+        },
+        "qaas.defaultShots": {
+          "type": "integer",
+          "default": 1024,
+          "minimum": 1,
+          "description": "Default shots when running OpenQASM files."
+        },
+        "qaas.confirmSubmit": {
+          "type": "boolean",
+          "default": true,
+          "description": "Ask for confirmation, showing the billed-time estimate, before submitting."
+        },
+        "qaas.showEstimates": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show estimated VLQ billed time above job submissions in Python files, notebooks and .qasm files."
+        },
+        "qaas.validateQasm": {
+          "type": "boolean",
+          "default": true,
+          "description": "Check OpenQASM 3 files with Qiskit's importer when they are opened or saved."
+        },
+        "qaas.jobPollSeconds": {
+          "type": "integer",
+          "default": 20,
+          "minimum": 5,
+          "description": "How often active jobs are refreshed."
+        },
+        "qaas.resultsDirectory": {
+          "type": "string",
+          "default": "${workspaceFolder}/qaas-results/${jobId}-${jobName}",
+          "markdownDescription": "Where results are downloaded. Variables: `${workspaceFolder}`, `${userHome}`, `${jobId}`, `${jobName}`, `${project}`, `${date}`; `~` works too."
+        },
+        "qaas.downloadMeasurements": {
+          "type": "boolean",
+          "default": false,
+          "description": "Also download per-shot measurements (larger files)."
+        },
+        "qaas.autoDownloadResults": {
+          "type": "boolean",
+          "default": false,
+          "description": "Download results automatically when a job finishes."
+        },
+        "qaas.importJobLimit": {
+          "type": "integer",
+          "default": 50,
+          "minimum": 1,
+          "description": "Maximum number of jobs fetched by Import Jobs from HEAppE."
         }
       }
-    }
+    },
+    "taskDefinitions": [
+      {
+        "type": "qaas",
+        "properties": {
+          "task": {
+            "type": "string"
+          }
+        }
+      }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "lint": "eslint src",
-    "pretest": "npm run compile && npm run lint",
+    "format": "biome format --write . && ruff format .",
+    "lint": "biome check . && ruff check . && ruff format --check .",
+    "lint:fix": "biome check --write . && ruff check --fix . && ruff format .",
+    "test:unit": "npm run compile && node --test out/test/unit/*.test.js",
+    "pretest": "npm run compile",
     "test": "vscode-test",
     "package": "vsce package"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.2.4",
     "@types/mocha": "^10.0.10",
     "@types/node": "^22.10.0",
     "@types/vscode": "^1.95.0",
-    "@vscode/test-cli": "^0.0.11",
-    "@vscode/test-electron": "^2.5.2",
+    "@vscode/test-cli": "^0.0.15",
+    "@vscode/test-electron": "^3.1.0",
     "@vscode/vsce": "^3.2.2",
-    "eslint": "^9.17.0",
-    "typescript": "^5.7.2",
-    "typescript-eslint": "^8.18.2"
+    "typescript": "^5.7.2"
   }
 }

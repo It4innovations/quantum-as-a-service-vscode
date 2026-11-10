@@ -1,10 +1,9 @@
-import { execFile } from "node:child_process";
-import * as path from "node:path";
 import * as vscode from "vscode";
+import { cfg } from "./config";
 
 /** Resolve the interpreter: qaas.pythonPath, then the Python extension's selection, then python3. */
 export async function resolvePython(): Promise<string> {
-  const configured = vscode.workspace.getConfiguration("qaas").get<string>("pythonPath");
+  const configured = cfg().get<string>("pythonPath");
   if (configured) {
     return configured;
   }
@@ -23,38 +22,4 @@ export async function resolvePython(): Promise<string> {
     }
   }
   return process.platform === "win32" ? "python" : "python3";
-}
-
-export interface BridgeResult<T> {
-  ok: boolean;
-  data?: T;
-  error?: string;
-}
-
-/** Run python/qaas_bridge.py and parse the JSON object on its last stdout line. */
-export async function runBridge<T>(
-  context: vscode.ExtensionContext,
-  args: string[],
-  env: Record<string, string> = {},
-  token?: vscode.CancellationToken,
-): Promise<BridgeResult<T>> {
-  const python = await resolvePython();
-  const script = path.join(context.extensionPath, "python", "qaas_bridge.py");
-
-  return new Promise((resolve) => {
-    const child = execFile(
-      python,
-      [script, ...args],
-      { env: { ...process.env, ...env }, maxBuffer: 16 * 1024 * 1024 },
-      (err, stdout, stderr) => {
-        const lastLine = stdout.trim().split("\n").pop() ?? "";
-        try {
-          resolve(JSON.parse(lastLine) as BridgeResult<T>);
-        } catch {
-          resolve({ ok: false, error: (stderr || err?.message || "No output from Python bridge").trim() });
-        }
-      },
-    );
-    token?.onCancellationRequested(() => child.kill());
-  });
 }
