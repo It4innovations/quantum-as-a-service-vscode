@@ -1,0 +1,136 @@
+{
+  "name": "qaas-vscode",
+  "displayName": "Quantum-as-a-Service (QHEAppE)",
+  "description": "Run Qiskit circuits on the VLQ quantum computer through LEXIS and HEAppE using the qaas Python package.",
+  "version": "0.0.1",
+  "publisher": "it4innovations",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/It4innovations/quantum-as-a-service-vscode.git"
+  },
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "quantum",
+    "qiskit",
+    "IQM",
+    "VLQ",
+    "LEXIS",
+    "HEAppE"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "qaas.checkEnvironment",
+        "title": "Check Python Environment",
+        "category": "QaaS"
+      },
+      {
+        "command": "qaas.installPackage",
+        "title": "Install qaas Package",
+        "category": "QaaS"
+      },
+      {
+        "command": "qaas.setToken",
+        "title": "Set LEXIS Token",
+        "category": "QaaS"
+      },
+      {
+        "command": "qaas.clearToken",
+        "title": "Clear LEXIS Token",
+        "category": "QaaS"
+      },
+      {
+        "command": "qaas.listBackends",
+        "title": "List Available Backends",
+        "category": "QaaS"
+      },
+      {
+        "command": "qaas.newCircuitFile",
+        "title": "New VLQ Circuit File",
+        "category": "QaaS"
+      },
+      {
+        "command": "qaas.runCurrentFile",
+        "title": "Run Current File on VLQ",
+        "category": "QaaS",
+        "icon": "$(play)"
+      }
+    ],
+    "menus": {
+      "editor/title/run": [
+        {
+          "command": "qaas.runCurrentFile",
+          "when": "resourceLangId == python"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Quantum-as-a-Service",
+      "properties": {
+        "qaas.pythonPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Python interpreter with `qaas` installed. Leave empty to use the interpreter selected in the Python extension, then `python3`."
+        },
+        "qaas.lexisProject": {
+          "type": "string",
+          "default": "",
+          "description": "LEXIS project identifier."
+        },
+        "qaas.lexisResource": {
+          "type": "string",
+          "default": "",
+          "description": "LEXIS resource name. Leave empty to let the client choose."
+        },
+        "qaas.backendName": {
+          "type": "string",
+          "default": "VLQ",
+          "description": "Quantum backend name."
+        },
+        "qaas.packageExtra": {
+          "type": "string",
+          "enum": [
+            "iqm_qiskit",
+            "iqm36_qiskit",
+            "iqm35_qiskit"
+          ],
+          "default": "iqm_qiskit",
+          "description": "Which IQM extra to install with qaas."
+        },
+        "qaas.packageIndexUrl": {
+          "type": "string",
+          "default": "https://opencode.it4i.eu/api/v4/projects/107/packages/pypi/simple",
+          "description": "Extra pip index URL that hosts the qaas package."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src",
+    "pretest": "npm run compile && npm run lint",
+    "test": "vscode-test",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^22.10.0",
+    "@types/vscode": "^1.95.0",
+    "@vscode/test-cli": "^0.0.11",
+    "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "^3.2.2",
+    "eslint": "^9.17.0",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.18.2"
+  }
+}
