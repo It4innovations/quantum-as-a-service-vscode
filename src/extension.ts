@@ -10,6 +10,7 @@ interface CheckData {
   packages: Record<string, string | null>;
   importable: boolean;
   importError?: string;
+  qaasOutdated: boolean;
 }
 
 interface BackendInfo {
@@ -67,7 +68,15 @@ async function checkEnvironment(context: vscode.ExtensionContext): Promise<void>
   for (const [name, ver] of Object.entries(d.packages)) {
     output.appendLine(`  ${name}: ${ver ?? "not installed"}`);
   }
-  if (d.importable) {
+  if (d.importable && d.qaasOutdated) {
+    const choice = await vscode.window.showWarningMessage(
+      `QaaS: qaas ${d.packages.qaas} is older than 1.0.0. Upgrade to the PyPI release?`,
+      "Upgrade qaas",
+    );
+    if (choice === "Upgrade qaas") {
+      await vscode.commands.executeCommand("qaas.installPackage");
+    }
+  } else if (d.importable) {
     vscode.window.showInformationMessage(`QaaS: qaas ${d.packages.qaas} is ready (Python ${d.python}).`);
   } else {
     output.appendLine(`  import error: ${d.importError}`);
@@ -84,17 +93,16 @@ async function checkEnvironment(context: vscode.ExtensionContext): Promise<void>
   }
 }
 
+/** qaas releases this extension supports (PyPI). */
+const QAAS_REQUIREMENT = ">=1.0.0,<2";
+
 async function installPackage(): Promise<void> {
   const python = await resolvePython();
   const extra = config().get<string>("packageExtra") || "iqm_qiskit";
-  const indexUrl = config().get<string>("packageIndexUrl");
   const terminal = vscode.window.createTerminal("QaaS install");
   terminal.show();
   const quote = (s: string) => (process.platform === "win32" ? `"${s}"` : `'${s}'`);
-  terminal.sendText(
-    `${quote(python)} -m pip install ${quote(`qaas[${extra}]`)}` +
-      (indexUrl ? ` --extra-index-url ${quote(indexUrl)}` : ""),
-  );
+  terminal.sendText(`${quote(python)} -m pip install --upgrade ${quote(`qaas[${extra}]${QAAS_REQUIREMENT}`)}`);
 }
 
 async function listBackends(context: vscode.ExtensionContext): Promise<void> {

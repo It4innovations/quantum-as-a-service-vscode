@@ -9,7 +9,7 @@ Run Qiskit circuits on the **VLQ** quantum computer from VS Code, through
 | Command | What it does |
 | --- | --- |
 | `QaaS: Check Python Environment` | Shows the interpreter and the installed `qaas`, `qiskit`, `iqm-client`, `py4lexis` versions. |
-| `QaaS: Install qaas Package` | Runs `pip install qaas[<extra>]` from the IT4I package index in a terminal. |
+| `QaaS: Install qaas Package` | Runs `pip install --upgrade "qaas[<extra>]>=1.0.0,<2"` from PyPI in a terminal. |
 | `QaaS: Set LEXIS Token` / `Clear LEXIS Token` | Stores a LEXIS access token in VS Code secret storage. Without one, a browser login opens. |
 | `QaaS: List Available Backends` | Lists the backends for your LEXIS project and sets the default one. |
 | `QaaS: New VLQ Circuit File` | Opens a Bell-state example that runs on VLQ. |
@@ -24,14 +24,13 @@ Run Qiskit circuits on the **VLQ** quantum computer from VS Code, through
 | `qaas.lexisResource` | *(empty)* | LEXIS resource name; empty lets the client choose. |
 | `qaas.backendName` | `VLQ` | Backend name. |
 | `qaas.packageExtra` | `iqm_qiskit` | IQM extra to install (see the qaas compatibility table). |
-| `qaas.packageIndexUrl` | IT4I GitLab index | Extra pip index that hosts `qaas`. |
 
 Scripts started with **Run Current File on VLQ** receive `LEXIS_PROJECT`, `LEXIS_RESOURCE`,
 `QAAS_BACKEND` and, if set, `LEXIS_TOKEN` as environment variables.
 
 ## Requirements
 
-- Python 3.12 with `qaas` and one IQM extra installed
+- Python 3.12 with [`qaas`](https://pypi.org/project/qaas/) 1.0.0 or newer and one IQM extra installed
 - A LEXIS project with access to a quantum resource
 
 ## How it works

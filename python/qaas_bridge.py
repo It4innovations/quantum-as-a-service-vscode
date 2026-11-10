@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import traceback
 from importlib import metadata
@@ -30,6 +31,22 @@ def _version(dist: str) -> str | None:
         return None
 
 
+MIN_QAAS = (1, 0, 0)
+
+
+def _is_outdated(version: str | None) -> bool:
+    """True for qaas older than 1.0.0, including pre-releases such as 1.0.0a1."""
+    if version is None:
+        return False
+    match = re.match(r"(\d+(?:\.\d+)*)(.*)", version)
+    if not match:
+        return False
+    release = tuple(int(x) for x in match.group(1).split("."))
+    release += (0,) * (3 - len(release))
+    pre = bool(re.match(r"\.?(a|b|rc|dev)", match.group(2)))
+    return release < MIN_QAAS or (release == MIN_QAAS and pre)
+
+
 def cmd_check(_: argparse.Namespace) -> dict:
     data = {
         "python": sys.version.split()[0],
@@ -39,6 +56,7 @@ def cmd_check(_: argparse.Namespace) -> dict:
             for name in ("qaas", "qiskit", "iqm-client", "py4lexis", "Py4HEAppE")
         },
     }
+    data["qaasOutdated"] = _is_outdated(data["packages"]["qaas"])
     try:
         import qheappe_client.qprovider  # noqa: F401
 

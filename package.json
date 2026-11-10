@@ -103,12 +103,7 @@
             "iqm35_qiskit"
           ],
           "default": "iqm_qiskit",
-          "description": "Which IQM extra to install with qaas."
-        },
-        "qaas.packageIndexUrl": {
-          "type": "string",
-          "default": "https://opencode.it4i.eu/api/v4/projects/107/packages/pypi/simple",
-          "description": "Extra pip index URL that hosts the qaas package."
+          "description": "Which IQM extra to install with qaas (see the qaas compatibility table)."
         }
       }
     }
