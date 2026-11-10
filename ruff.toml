@@ -1,0 +1,10 @@
+# Python bridge and templates. Matches qaas: Python 3.12.
+target-version = "py312"
+line-length = 100
+include = ["python/**/*.py", "templates/**/*.py"]
+
+[lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+
+[format]
+quote-style = "double"

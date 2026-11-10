@@ -7,9 +7,8 @@ Without LEXIS_TOKEN, a browser login opens.
 
 import os
 
-from qiskit import QuantumCircuit
-
 from qheappe_client.qprovider import QProvider
+from qiskit import QuantumCircuit
 
 qc = QuantumCircuit(2, 2)
 qc.h(0)

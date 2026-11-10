@@ -1,0 +1,12 @@
+{
+  "editor.formatOnSave": true,
+  "[typescript][javascript][json][jsonc]": {
+    "editor.defaultFormatter": "biomejs.biome",
+    "editor.codeActionsOnSave": { "source.organizeImports.biome": "explicit", "source.fixAll.biome": "explicit" }
+  },
+  "[python]": {
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.codeActionsOnSave": { "source.organizeImports.ruff": "explicit", "source.fixAll.ruff": "explicit" }
+  },
+  "typescript.tsdk": "node_modules/typescript/lib"
+}
