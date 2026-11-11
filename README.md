@@ -58,7 +58,7 @@ Status: ✅ available and tested (live items verified on VLQ, 2026-11-11) · �
 | Jobs survive restarts; active jobs are refreshed in the background | ✅ | Background refresh starts only when no login prompt can appear |
 | Import past jobs from HEAppE (`ListJobsForCurrentUser`) | ✅ | |
 | Jobs grouped into **Own and accessible** and **Other users' jobs (no access)**, labelled by LEXIS resource (e.g. `VLQ-EU`) | 🔶 | HEAppE lists every user's jobs to Managers/Administrators but only lets the submitter read them. The no-access group (by resource) has no actions and is never polled; a 403 moves an imported job there. Ownership and resources verified on VLQ |
-| Cancel, copy ID, remove from list | ⚠️ | Copy ID and remove work. Cancel reaches HEAppE, but QScheduler currently rejects it (HTTP 502, cannot parse its task id); the extension reports the refusal |
+| Cancel, copy ID, remove from list | ⚠️ | Copy ID and remove work. Cancel reaches HEAppE, but HEAppE sends QScheduler `session:X:task:Y` minus the prefix as a session ID, which QScheduler rejects (HTTP 502); reported to HEAppE. The extension reports the refusal |
 | Notification when a job finishes; optional automatic download | ✅ | |
 
 ### Results and analysis
