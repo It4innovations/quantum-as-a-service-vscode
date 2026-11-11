@@ -57,6 +57,7 @@ Status: ✅ available and tested (live items verified on VLQ, 2026-11-11) · �
 | Jobs view with state, shots, estimate, calibration set and source file | ✅ | |
 | Jobs survive restarts; active jobs are refreshed in the background | ✅ | Background refresh starts only when no login prompt can appear |
 | Import past jobs from HEAppE (`ListJobsForCurrentUser`) | ✅ | |
+| Jobs grouped into **Own and accessible** and **Other users' jobs (no access)**, labelled by LEXIS resource (e.g. `VLQ-EU`) | 🔶 | HEAppE lists every user's jobs to Managers/Administrators but only lets the submitter read them. The no-access group (by resource) has no actions and is never polled; a 403 moves an imported job there. Ownership and resources verified on VLQ |
 | Cancel, copy ID, remove from list | ⚠️ | Copy ID and remove work. Cancel reaches HEAppE, but QScheduler currently rejects it (HTTP 502, cannot parse its task id); the extension reports the refusal |
 | Notification when a job finishes; optional automatic download | ✅ | |
 
@@ -83,6 +84,17 @@ Status: ✅ available and tested (live items verified on VLQ, 2026-11-11) · �
 | Formula from the [VLQ consumption guide](https://docs.it4i.cz/en/docs/clusters/vlq/vlq-consumption-guide) | ✅ | Checked against the guide's examples in unit tests |
 | Exact circuit time from the transpiled circuit and calibration data (instead of the 0–50 µs range) | 🗓️ | |
 
+### Calibrations
+
+| Feature | Status | Notes |
+| --- | --- | --- |
+| Calibrations view: the current calibration set and every set seen on jobs, in operator files or in earlier refreshes | ✅ | HEAppE/QScheduler cannot list calibration sets, so the view lists known IDs; `Open Calibration Set by ID…` adds others. A new current set is announced with **Compare** |
+| Fetch quality metrics of the current set or one by ID, cached locally | ✅ | `calibrationMetrics` via QScheduler `MachineCalibration` (metrics). Sets IQM no longer serves are reported clearly. Verified on VLQ |
+| Calibration panel: median tiles with the worst qubit, per-qubit dot plot with uncertainties, chip diagram (qubits around the resonator) coloured by any metric, table of all metrics per qubit with ⚠ on the two worst | 🔶 | T1, T2*, T2 echo, PRX / Clifford / CZ / MOVE fidelity, readout fidelity and errors, QND; resonator T1/T2 and GHZ population in a separate table. Rendered with real VLQ data, not yet clicked through in VS Code |
+| Compare two calibration sets: paired points, change per tile, table of changes (blue better / red worse) | 🔶 | |
+| Export a calibration set as tidy CSV (raw SI value, display value, uncertainty), optionally in Data Wrangler | ✅ | |
+| Calibration history over time (trend per qubit) | 🗓️ | Needs IQM/QScheduler to list past calibration sets |
+
 ### Pulse-level operator catalog
 
 | Feature | Status | Notes |
@@ -105,6 +117,26 @@ Status: ✅ available and tested (live items verified on VLQ, 2026-11-11) · �
 | Pulse schedule timeline after compilation | 🗓️ | |
 | Ramsey and T1 calibration recipes | 🗓️ | |
 | Operators for other gates (`cz`, `measure`, `move`) | 🗓️ | Only `prx` (`PRX_CustomWaveforms`) for now |
+
+## Platform support
+
+Developed and tested on **macOS** (Apple silicon, VS Code 1.145). **Compatibility with Windows and Linux
+still has to be checked.** Areas that differ per platform and need testing there:
+
+| Area | What to check |
+| --- | --- |
+| Interpreter discovery | venv layout (`Scripts\python.exe` on Windows), conda / miniconda / miniforge locations, pyenv vs. pyenv-win, the Microsoft Store Python stub |
+| Environment creation and qaas install | `python -m venv`, `conda create`, pip as a VS Code task in PowerShell / cmd |
+| Run Python File on VLQ | Terminal quoting and environment variables in PowerShell and cmd |
+| Python bridge | Process start and the JSON-lines protocol on Windows (stdin/stdout duplication, line endings), browser-login notification |
+| Paths | `qaas.resultsDirectory` variables, `~` expansion, `.qaas/` files, downloads with backslashes |
+| Webviews and Data Wrangler | Results and calibration panels, waveform editor, `openWith` for Data Wrangler |
+
+| Platform | Status |
+| --- | --- |
+| macOS | ✅ |
+| Linux | 🗓️ to be checked |
+| Windows | 🗓️ to be checked |
 
 ## Operator files
 

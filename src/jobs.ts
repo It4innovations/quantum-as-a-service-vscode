@@ -48,6 +48,29 @@ export interface JobRecord {
   origin: "extension" | "imported";
   /** LEXIS instance the job was submitted to; undefined for production. */
   instance?: LexisInstance;
+  /**
+   * "foreign": another user's job that HEAppE lists because the signed-in user is a Manager or
+   * Administrator somewhere; its details and results are not accessible (HTTP 403).
+   */
+  access?: "own" | "foreign";
+}
+
+/** Group node of the Jobs view. */
+export interface JobGroup {
+  group: "own" | "foreign";
+  resource?: string;
+}
+export type JobNode = JobRecord | JobGroup;
+export const isJob = (n: unknown): n is JobRecord => typeof n === "object" && n !== null && "jobId" in n;
+export const isForeign = (r: JobRecord) => r.access === "foreign";
+
+/** HEAppE times have no zone and are UTC. */
+function heappeTime(t?: string): string {
+  if (!t) {
+    return new Date(0).toISOString();
+  }
+  const d = new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(t) ? t : `${t.replace(" ", "T")}Z`);
+  return Number.isNaN(d.getTime()) ? new Date(0).toISOString() : d.toISOString();
 }
 
 const STORE_KEY = "qaas.jobs";
@@ -116,7 +139,7 @@ function stateIcon(state: string): vscode.ThemeIcon {
   }
 }
 
-export class JobsTreeProvider implements vscode.TreeDataProvider<JobRecord> {
+export class JobsTreeProvider implements vscode.TreeDataProvider<JobNode> {
   private readonly changed = new vscode.EventEmitter<void>();
   readonly onDidChangeTreeData = this.changed.event;
 
@@ -124,14 +147,38 @@ export class JobsTreeProvider implements vscode.TreeDataProvider<JobRecord> {
     store.onDidChange(() => this.changed.fire());
   }
 
-  getChildren(element?: JobRecord): JobRecord[] {
-    return element ? [] : this.store.all();
+  getChildren(element?: JobNode): JobNode[] {
+    const all = this.store.all();
+    const own = all.filter((r) => !isForeign(r));
+    const foreign = all.filter(isForeign);
+    if (!element) {
+      // Only split into groups when there is something to separate.
+      return foreign.length ? [{ group: "own" }, { group: "foreign" }] : own;
+    }
+    if (isJob(element)) {
+      return [];
+    }
+    if (element.group === "own") {
+      return own;
+    }
+    if (element.resource !== undefined) {
+      return foreign.filter((r) => (r.resource || "") === element.resource);
+    }
+    const resources = [...new Set(foreign.map((r) => r.resource || ""))].sort();
+    return resources.length > 1 ? resources.map((resource) => ({ group: "foreign", resource })) : foreign;
   }
 
-  getTreeItem(r: JobRecord): vscode.TreeItem {
+  getTreeItem(node: JobNode): vscode.TreeItem {
+    if (!isJob(node)) {
+      return this.groupItem(node);
+    }
+    const r = node;
+    if (isForeign(r)) {
+      return this.foreignItem(r);
+    }
     const item = new vscode.TreeItem(r.name || `Job ${r.jobId}`);
     item.id = key(r);
-    item.description = `${r.state.toLowerCase()} · #${r.jobId} · ${r.backend || "?"}${r.kind === "pulse" ? " · pulse" : ""}${
+    item.description = `${r.state.toLowerCase()} · #${r.jobId} · ${r.resource || r.backend || "?"}${r.kind === "pulse" ? " · pulse" : ""}${
       r.instance ? ` · LEXIS ${instanceLabel(r.instance)}` : ""
     }`;
     item.iconPath = stateIcon(r.state);
@@ -175,6 +222,52 @@ export class JobsTreeProvider implements vscode.TreeDataProvider<JobRecord> {
     }
     return item;
   }
+
+  private groupItem(g: JobGroup): vscode.TreeItem {
+    const all = this.store.all();
+    const members = all.filter((r) =>
+      g.group === "own"
+        ? !isForeign(r)
+        : isForeign(r) && (g.resource === undefined || (r.resource || "") === g.resource),
+    );
+    const label =
+      g.group === "own"
+        ? "Own and accessible"
+        : g.resource !== undefined
+          ? g.resource || "Unknown resource"
+          : "Other users' jobs (no access)";
+    const item = new vscode.TreeItem(
+      label,
+      g.group === "own" ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.Collapsed,
+    );
+    item.id = `group:${g.group}:${g.resource ?? ""}`;
+    item.description = `${members.length}`;
+    item.iconPath = new vscode.ThemeIcon(
+      g.group === "own" ? "account" : g.resource !== undefined ? "server-environment" : "lock",
+    );
+    item.tooltip = groupTooltip(g);
+    item.contextValue = g.group === "foreign" && g.resource === undefined ? "jobGroupForeign" : "jobGroup";
+    return item;
+  }
+
+  /** Another user's job: identification only, no actions. */
+  private foreignItem(r: JobRecord): vscode.TreeItem {
+    const item = new vscode.TreeItem(r.name || `Job ${r.jobId}`);
+    item.id = `foreign:${key(r)}`;
+    item.description = `${r.state.toLowerCase()} · #${r.jobId} · ${r.resource || "?"}`;
+    item.iconPath = new vscode.ThemeIcon("lock", new vscode.ThemeColor("disabledForeground"));
+    const md = new vscode.MarkdownString(undefined, true);
+    md.appendMarkdown(`**${r.name || "Job"}** — ${r.state} (as last listed by HEAppE)\n\n`);
+    md.appendMarkdown(`HEAppE job: \`${r.jobId}\`  \nResource: \`${r.resource || "?"}\`  \n`);
+    md.appendMarkdown(`Listed: ${new Date(r.submittedAt).toLocaleString()}\n\n`);
+    md.appendMarkdown(
+      "Submitted by another user. HEAppE lists it because you are a Manager or Administrator in a HEAppE project, " +
+        "but only the submitter or an Administrator of its project can read its status and results.",
+    );
+    item.tooltip = md;
+    item.contextValue = "foreignJob";
+    return item;
+  }
 }
 
 interface JobInfo {
@@ -186,6 +279,13 @@ interface JobInfo {
 interface DownloadResult {
   directory: string;
   counts: Record<string, number>[];
+}
+
+function groupTooltip(g: JobGroup): string {
+  return g.group === "own"
+    ? "Jobs you submitted (or imported as yours): status, results and downloads are available."
+    : "Jobs of other users that HEAppE lists because you are a Manager or Administrator in a HEAppE project. " +
+        "HEAppE allows only the submitter or a project Administrator to read them, so status updates and results are not available.";
 }
 
 export class JobManager implements vscode.Disposable {
@@ -232,7 +332,7 @@ export class JobManager implements vscode.Disposable {
     if (this.polling) {
       return;
     }
-    const active = this.store.all().filter((r) => !TERMINAL.has(r.state));
+    const active = this.store.all().filter((r) => !TERMINAL.has(r.state) && !isForeign(r));
     if (active.length === 0) {
       return;
     }
@@ -255,6 +355,9 @@ export class JobManager implements vscode.Disposable {
           }
         } catch (e) {
           this.output.appendLine(`[jobs] status of ${r.jobId} failed: ${(e as Error).message}`);
+          if (await this.markForeignIfDenied(r, e)) {
+            continue;
+          }
           if (userInitiated) {
             vscode.window.showErrorMessage(`QaaS: could not refresh job ${r.jobId}: ${(e as Error).message}`);
             break;
@@ -346,9 +449,24 @@ export class JobManager implements vscode.Disposable {
       }
       return next;
     } catch (e) {
+      if (await this.markForeignIfDenied(r, e)) {
+        vscode.window.showWarningMessage(
+          `QaaS: job #${r.jobId} belongs to another user; HEAppE does not give access to its results. It was moved to "Other users' jobs".`,
+        );
+        return undefined;
+      }
       vscode.window.showErrorMessage(`QaaS: download of #${r.jobId} failed: ${(e as Error).message}`);
       return undefined;
     }
+  }
+
+  /** HEAppE's 403 on a job means it is another user's: move it to the no-access group. */
+  private async markForeignIfDenied(r: JobRecord, e: unknown): Promise<boolean> {
+    if (r.origin !== "imported" || !/HTTP 403/.test((e as Error)?.message ?? "")) {
+      return false;
+    }
+    await this.store.update(r, { access: "foreign" });
+    return true;
   }
 
   openResults(r: JobRecord, counts: Counts[]): void {
@@ -404,7 +522,9 @@ export class JobManager implements vscode.Disposable {
   }
 
   /** Pull the user's job list from HEAppE, e.g. jobs submitted from scripts or notebooks. */
-  async importFromHeappe(opts: { quiet?: boolean } = {}): Promise<{ found: number; added: number } | undefined> {
+  async importFromHeappe(
+    opts: { quiet?: boolean } = {},
+  ): Promise<{ found: number; added: number; foreign: number } | undefined> {
     if (!(await requireProject()) || !(await ensureReady(this.bridge, this.secrets, this.output))) {
       return undefined;
     }
@@ -417,19 +537,35 @@ export class JobManager implements vscode.Disposable {
           cancellable: true,
         },
         (_p, token) =>
-          this.bridge.call<{ jobId: string; name?: string; state: string; createdAt?: string; tasks: number }[]>(
-            "listJobs",
-            target,
-            { limit: cfg().get<number>("importJobLimit") ?? 50 },
-            token,
-          ),
+          this.bridge.call<
+            {
+              jobId: string;
+              name?: string;
+              state: string;
+              createdAt?: string;
+              tasks: number;
+              resource?: string | null;
+              own: boolean;
+            }[]
+          >("listJobs", target, { limit: cfg().get<number>("importJobLimit") ?? 50 }, token),
       );
       let added = 0;
       for (const j of jobs) {
+        const access = j.own ? "own" : "foreign";
         const existing = this.store.get(target.project, j.jobId, target.instance);
         if (existing) {
+          const patch: Partial<JobRecord> = {};
           if (existing.state !== j.state) {
-            await this.store.update(existing, { state: j.state });
+            patch.state = j.state;
+          }
+          if ((existing.access ?? "own") !== access) {
+            patch.access = access;
+          }
+          if (j.resource && existing.resource !== j.resource) {
+            patch.resource = j.resource;
+          }
+          if (Object.keys(patch).length) {
+            await this.store.update(existing, patch);
           }
           continue;
         }
@@ -438,19 +574,25 @@ export class JobManager implements vscode.Disposable {
           jobId: j.jobId,
           name: j.name || `Job ${j.jobId}`,
           project: target.project,
-          resource: target.resource,
+          resource: j.resource || target.resource,
           backend: target.backend,
           instance: target.instance,
           state: j.state,
           circuits: j.tasks || undefined,
-          submittedAt: j.createdAt ? new Date(j.createdAt).toISOString() : new Date(0).toISOString(),
+          submittedAt: heappeTime(j.createdAt),
           origin: "imported",
+          access,
         });
       }
+      const foreign = jobs.filter((j) => !j.own).length;
       if (!opts.quiet) {
-        vscode.window.showInformationMessage(`QaaS: ${jobs.length} jobs found on HEAppE, ${added} new.`);
+        vscode.window.showInformationMessage(
+          `QaaS: ${jobs.length - foreign} own jobs found on HEAppE, ${added} new${
+            foreign ? `; ${foreign} other users' jobs listed without access` : ""
+          }.`,
+        );
       }
-      return { found: jobs.length, added };
+      return { found: jobs.length - foreign, added, foreign };
     } catch (e) {
       if (opts.quiet) {
         throw e;
