@@ -382,6 +382,7 @@ export class QasmCommands {
         project: target.project,
         resource: target.resource,
         backend: target.backend,
+        instance: target.instance,
         state: "SUBMITTED",
         submittedAt: res.submittedAt,
         shots,

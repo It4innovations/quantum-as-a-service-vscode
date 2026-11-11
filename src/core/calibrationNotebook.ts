@@ -4,6 +4,7 @@
  * the extension applies to the operator.
  */
 
+import type { LexisInstance } from "./devEnv";
 import { estimate, formatSeconds } from "./estimate";
 import { CALIBRATION_RESULT_SCHEMA } from "./operators";
 
@@ -16,6 +17,8 @@ export interface CalibrationNotebookInput {
   backend: string;
   qubit: string;
   resultDirectory: string;
+  /** Non-production LEXIS instance (e.g. the test instance); undefined for production. */
+  instance?: LexisInstance;
 }
 
 /** Rounds of the Rabi calibration: (span relative to start amplitude, points, shots). */
@@ -35,6 +38,22 @@ export function calibrationCost(): number {
 }
 
 const py = (s: string) => JSON.stringify(s);
+
+/** LEXIS instance settings for the login cell; py4lexis reads the PY4LEXIS_* variables. */
+function instanceLines(instance?: LexisInstance): string {
+  const lines = [`LEXIS_API_URL = ${instance?.apiUrl ? py(instance.apiUrl) : "None"}  # None: production`];
+  const vars: [string, string | undefined][] = [
+    ["PY4LEXIS_AAI_URL", instance?.aaiUrl],
+    ["PY4LEXIS_API_URL", instance?.apiUrl],
+    ["PY4LEXIS_REALM", instance?.realm],
+  ];
+  for (const [name, value] of vars) {
+    if (value) {
+      lines.push(`os.environ[${py(name)}] = ${py(value)}`);
+    }
+  }
+  return lines.join("\n");
+}
 
 export function buildCalibrationNotebook(i: CalibrationNotebookInput): string {
   const cost = formatSeconds(calibrationCost());
@@ -56,6 +75,7 @@ Needs \`qaas[iqm_qiskit]\`, \`matplotlib\`, QScheduler with pulse access, HEAppE
     {
       cell_type: "code",
       source: `import json
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -73,7 +93,8 @@ BACKEND = ${py(i.backend)} or None
 QUBIT = ${py(i.qubit)}
 OPERATOR = ${py(i.operator)}
 RESULT_DIR = Path(${py(i.resultDirectory)})
-JOB_TIMEOUT = 900  # seconds per job`,
+JOB_TIMEOUT = 900  # seconds per job
+${instanceLines(i.instance)}`,
     },
     {
       cell_type: "markdown",
@@ -83,7 +104,7 @@ JOB_TIMEOUT = 900  # seconds per job`,
     { cell_type: "markdown", source: "## Connect and read the native gate" },
     {
       cell_type: "code",
-      source: `provider = QProvider(LEXIS_PROJECT)
+      source: `provider = QProvider(LEXIS_PROJECT, **({"lexis_api_url": LEXIS_API_URL} if LEXIS_API_URL else {}))
 pulla = provider.get_pulla(RESOURCE, BACKEND)
 compiler = pulla.get_qiskit_compiler()
 register_qaas_operators(compiler)

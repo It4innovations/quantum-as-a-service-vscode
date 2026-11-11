@@ -19,6 +19,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import traceback
 from datetime import UTC, datetime
 from importlib import metadata
@@ -104,33 +105,102 @@ def _circuit_stats(qc) -> dict:
     }
 
 
+def _jwt_claims(token: str) -> dict:
+    """Unverified JWT payload, or {} for tokens that are not JWTs."""
+    import base64
+
+    try:
+        payload = token.split(".")[1]
+        return json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    except Exception:
+        return {}
+
+
+def token_kind(token: str | None) -> str:
+    """'login' (no token), 'refresh' (refresh/offline token) or 'access'."""
+    if not token:
+        return "login"
+    return "refresh" if str(_jwt_claims(token).get("typ", "")).lower() in ("refresh", "offline") else "access"
+
+
+def _instance(p: dict) -> tuple[str | None, str | None, str | None]:
+    """(aai_url, api_url, realm) of the LEXIS instance; None means the production default."""
+    i = p.get("instance") or {}
+    return (
+        (i.get("aaiUrl") or "").rstrip("/") or None,
+        (i.get("apiUrl") or "").rstrip("/") or None,
+        i.get("realm") or None,
+    )
+
+
+LEXIS_LOG = Path(os.environ.get("QAAS_LEXIS_LOG") or Path(tempfile.gettempdir()) / "qaas-vscode-lexis.log")
+
+
 class Server:
     def __init__(self) -> None:
-        self._providers: dict[tuple[str, str | None], Any] = {}
+        self._sessions: dict[tuple, Any] = {}
+        self._issued: dict[tuple, str] = {}
+        self._providers: dict[tuple, Any] = {}
         self._backends: dict[tuple, Any] = {}
         self._pullas: dict[tuple, Any] = {}
 
     # --- connection -------------------------------------------------------
 
-    def _provider(self, p: dict):
+    def _access_token(self, p: dict) -> str:
+        """Access token for the request. Access tokens are used as they are; refresh tokens and the
+        browser login go through a py4lexis session that renews the access token when it expires."""
+        token = p.get("token") or None
+        if token_kind(token) == "access":
+            return token
+        aai, api, realm = _instance(p)
+        key = (token, aai, api, realm)
+        session = self._sessions.get(key)
+        if session is None:
+            from py4lexis.session import LexisSession
+
+            kwargs: dict[str, Any] = {
+                "aai_url": aai,
+                "api_url": api,
+                "realm": realm,
+                "log_file": str(LEXIS_LOG),
+                "reraise_exceptions": True,
+                "suppress_welcome": True,
+            }
+            if token:
+                kwargs.update(login_method="token", refresh_token=token)
+            session = LexisSession(**kwargs)
+            self._sessions[key] = session
+        access = session.get_access_token()
+        old = self._issued.get(key)
+        if old and old != access:
+            self._forget(old)
+        self._issued[key] = access
+        return access
+
+    def _forget(self, access_token: str) -> None:
+        """Drop clients built with an access token that has been renewed."""
+        for cache in (self._providers, self._backends, self._pullas):
+            for k in [k for k in cache if access_token in k]:
+                del cache[k]
+
+    def _context(self, p: dict) -> tuple[str, str, str | None]:
         project = p.get("project")
         if not project:
             raise BridgeError("No LEXIS project configured (setting qaas.lexisProject).")
-        token = p.get("token") or None
-        key = (project, token)
+        return project, self._access_token(p), _instance(p)[1]
+
+    def _provider(self, p: dict):
+        key = self._context(p)
         if key not in self._providers:
             from qheappe_client.qprovider import QProvider
 
-            self._providers[key] = QProvider(lexis_project=project, token=token)
+            project, token, api = key
+            kwargs = {"lexis_api_url": api} if api else {}
+            self._providers[key] = QProvider(lexis_project=project, token=token, **kwargs)
         return self._providers[key]
 
     def _backend(self, p: dict):
-        key = (
-            p.get("project"),
-            p.get("token"),
-            p.get("resource") or None,
-            p.get("backend") or None,
-        )
+        key = (*self._context(p), p.get("resource") or None, p.get("backend") or None)
         if key not in self._backends:
             self._backends[key] = self._provider(p).get_backend(
                 lexis_resource=p.get("resource") or None,
@@ -139,12 +209,7 @@ class Server:
         return self._backends[key]
 
     def _pulla(self, p: dict):
-        key = (
-            p.get("project"),
-            p.get("token"),
-            p.get("resource") or None,
-            p.get("backend") or None,
-        )
+        key = (*self._context(p), p.get("resource") or None, p.get("backend") or None)
         if key not in self._pullas:
             try:
                 self._pullas[key] = self._provider(p).get_pulla(
@@ -156,7 +221,25 @@ class Server:
                 raise BridgeError(str(exc)) from exc
         return self._pullas[key]
 
+    def whoami(self, p: dict) -> dict:
+        """Log in (if needed) and describe the connection, without touching HEAppE."""
+        aai, api, realm = _instance(p)
+        token = p.get("token") or None
+        claims = _jwt_claims(self._access_token(p))
+        exp = claims.get("exp")
+        return {
+            "user": claims.get("preferred_username") or claims.get("sub"),
+            "issuer": claims.get("iss"),
+            "expiresAt": datetime.fromtimestamp(exp, UTC).isoformat() if exp else None,
+            "tokenKind": token_kind(token),
+            "aaiUrl": aai,
+            "apiUrl": api,
+            "realm": realm,
+        }
+
     def reset(self, _: dict) -> bool:
+        self._sessions.clear()
+        self._issued.clear()
         self._providers.clear()
         self._backends.clear()
         self._pullas.clear()
