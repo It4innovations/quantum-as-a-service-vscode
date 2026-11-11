@@ -413,13 +413,37 @@ class Server:
             "tasks": len(info.get("Tasks") or []),
         }
 
+    def _heappe_user_id(self, qclient) -> int | None:
+        """HEAppE id of the signed-in user (CurrentUserInfo), or None if it cannot be read."""
+        try:
+            from py4heappe.heappe_v6.core.api.user_and_limitation_management_api import (
+                UserAndLimitationManagementApi,
+            )
+
+            info = UserAndLimitationManagementApi(
+                qclient.heappe_client
+            ).heappe_user_and_limitation_management_current_user_info_get(SessionCode="")
+            d = _jsonable(info)
+            user_id = d.get("id", d.get("Id"))
+            return int(user_id) if user_id is not None else None
+        except Exception as exc:
+            print(f"[bridge] could not read the HEAppE user id: {exc}", file=sys.stderr)
+            return None
+
     def listJobs(self, p: dict) -> list[dict]:
         from qheappe_client.utils import HEAppEJobState
 
-        api = self._backend(p)._qclient.job_management_api
+        qclient = self._backend(p)._qclient
+        api = qclient.job_management_api
         if api is None:
             raise BridgeError("HEAppE job management API is not available for this backend.")
-        jobs = api.heappe_job_management_list_jobs_for_current_user_get(SessionCode="", Limit=int(p.get("limit", 50)))
+        # ListJobsForCurrentUser returns every user's jobs when the user is a Manager or Administrator
+        # in any HEAppE group; filter by the signed-in user's HEAppE id to import only their own jobs.
+        kwargs: dict[str, Any] = {"SessionCode": "", "Limit": int(p.get("limit", 50))}
+        user_id = self._heappe_user_id(qclient)
+        if user_id is not None:
+            kwargs["UserId"] = user_id
+        jobs = api.heappe_job_management_list_jobs_for_current_user_get(**kwargs)
         out = []
         for job in jobs or []:
             d = _jsonable(job)
