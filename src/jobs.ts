@@ -162,12 +162,13 @@ export class JobStore {
   }
 }
 
-function stateIcon(state: string): vscode.ThemeIcon {
+/** State icon; pulse-level jobs use the pulse glyph in the state's colour. */
+function stateIcon(state: string, pulse = false): vscode.ThemeIcon {
   switch (state) {
     case "FINISHED":
-      return new vscode.ThemeIcon("pass", new vscode.ThemeColor("testing.iconPassed"));
+      return new vscode.ThemeIcon(pulse ? "pulse" : "pass", new vscode.ThemeColor("testing.iconPassed"));
     case "FAILED":
-      return new vscode.ThemeIcon("error", new vscode.ThemeColor("testing.iconFailed"));
+      return new vscode.ThemeIcon(pulse ? "pulse" : "error", new vscode.ThemeColor("testing.iconFailed"));
     case "CANCELED":
     case "CANCELLED":
       return new vscode.ThemeIcon("circle-slash");
@@ -217,12 +218,12 @@ export class JobsTreeProvider implements vscode.TreeDataProvider<JobNode> {
     }
     const item = new vscode.TreeItem(r.name || `Job ${r.jobId}`);
     item.id = key(r);
-    item.description = `${r.state.toLowerCase()} · #${r.jobId} · ${r.resource || r.backend || "?"}${r.kind === "pulse" ? " · pulse" : ""}${
+    item.description = `${r.state.toLowerCase()} · #${r.jobId} · ${r.resource || r.backend || "?"}${r.kind === "pulse" ? " · pulse-level" : ""}${
       r.instance ? ` · LEXIS ${instanceLabel(r.instance)}` : ""
     }`;
     item.iconPath = r.problem
       ? new vscode.ThemeIcon("warning", new vscode.ThemeColor("list.warningForeground"))
-      : stateIcon(r.state);
+      : stateIcon(r.state, r.kind === "pulse");
     item.resourceUri = jobUri(r);
     const done = TERMINAL.has(r.state);
     const unverified = needsAccessCheck(r);
@@ -238,7 +239,14 @@ export class JobsTreeProvider implements vscode.TreeDataProvider<JobNode> {
       item.description = `${item.description} · checking access…`;
     }
     const md = new vscode.MarkdownString(undefined, true);
-    md.appendMarkdown(`**${r.name || "Job"}** — ${r.state}\n\n`);
+    md.appendMarkdown(
+      `**${r.name || "Job"}** — ${r.state}${r.kind === "pulse" ? " · pulse-level job (QPulla)" : ""}\n\n`,
+    );
+    if (r.kind === "pulse" && r.origin === "imported") {
+      md.appendMarkdown(
+        "Results are rebuilt from the raw per-qubit readouts; for parameter sweeps, the shots of all sweep points are combined.\n\n",
+      );
+    }
     const rows: [string, string | undefined][] = [
       ["HEAppE job", r.jobId],
       ["LEXIS", r.instance ? (r.instance.apiUrl ?? r.instance.aaiUrl) : undefined],
@@ -332,6 +340,8 @@ interface JobInfo {
 interface DownloadResult {
   directory: string;
   counts: Record<string, number>[];
+  /** Set when pulse counts were rebuilt from raw readouts. */
+  note?: string;
 }
 
 function groupTooltip(g: JobGroup): string {
@@ -492,7 +502,7 @@ export class JobManager implements vscode.Disposable {
         return next;
       }
       const choice = await vscode.window.showInformationMessage(
-        `QaaS: results saved to ${res.directory}`,
+        `QaaS: results saved to ${res.directory}${res.note ? `. ${res.note}` : ""}`,
         "Show Results",
         "Reveal Folder",
       );
@@ -503,6 +513,11 @@ export class JobManager implements vscode.Disposable {
       }
       return next;
     } catch (e) {
+      if (r.kind !== "pulse" && r.origin === "imported" && /pulse-level job/.test((e as Error).message)) {
+        // no circuit results: it is a pulse-level job; fetch it as one
+        const pulse = await this.store.update(r, { kind: "pulse" });
+        return this.download(pulse, directory, openAfter);
+      }
       if (await this.markForeignIfDenied(r, e)) {
         vscode.window.showWarningMessage(
           `QaaS: job #${r.jobId} belongs to another user; HEAppE does not give access to its results. It was moved to "Other users' jobs".`,
@@ -585,7 +600,10 @@ export class JobManager implements vscode.Disposable {
    * Runs only when signed in (token or a login in this session).
    */
   async checkAccess(): Promise<number> {
-    const unknown = this.store.all().filter(needsAccessCheck);
+    // imported jobs with unknown ownership, or unknown kind (circuit / pulse-level)
+    const unknown = this.store
+      .all()
+      .filter((r) => needsAccessCheck(r) || (r.origin === "imported" && !isForeign(r) && r.kind === undefined));
     if (unknown.length === 0 || this.checkingAccess) {
       return 0;
     }
@@ -596,13 +614,11 @@ export class JobManager implements vscode.Disposable {
     let foreign = 0;
     try {
       const target = await currentTarget(this.secrets);
-      const listed = new Map<string, { own: boolean; resource?: string | null }>();
+      const listed = new Map<string, { own: boolean; resource?: string | null; kind?: "circuit" | "pulse" }>();
       try {
-        const jobs = await this.bridge.call<{ jobId: string; own: boolean; resource?: string | null }[]>(
-          "listJobs",
-          target,
-          { limit: Math.max(cfg().get<number>("importJobLimit") ?? 50, unknown.length) },
-        );
+        const jobs = await this.bridge.call<
+          { jobId: string; own: boolean; resource?: string | null; kind?: "circuit" | "pulse" }[]
+        >("listJobs", target, { limit: Math.max(cfg().get<number>("importJobLimit") ?? 50, unknown.length) });
         for (const j of jobs) {
           listed.set(j.jobId, j);
         }
@@ -611,7 +627,7 @@ export class JobManager implements vscode.Disposable {
       }
       for (const r of unknown) {
         const hit = listed.get(r.jobId);
-        let access: "own" | "foreign" | undefined = hit ? (hit.own ? "own" : "foreign") : undefined;
+        let access: "own" | "foreign" | undefined = r.access ?? (hit ? (hit.own ? "own" : "foreign") : undefined);
         if (!access) {
           try {
             await this.bridge.call<JobInfo>("jobInfo", await this.targetFor(r), { jobId: r.jobId });
@@ -628,7 +644,11 @@ export class JobManager implements vscode.Disposable {
         if (access === "foreign") {
           foreign++;
         }
-        await this.store.update(r, { access, ...(hit?.resource ? { resource: hit.resource } : {}) });
+        await this.store.update(r, {
+          access,
+          ...(hit?.resource ? { resource: hit.resource } : {}),
+          ...(hit?.kind ? { kind: hit.kind } : {}),
+        });
       }
       this.output.appendLine(
         `[jobs] access check: ${unknown.length} imported job(s) checked, ${foreign} of other users`,
@@ -664,6 +684,7 @@ export class JobManager implements vscode.Disposable {
               tasks: number;
               resource?: string | null;
               own: boolean;
+              kind?: "circuit" | "pulse";
             }[]
           >("listJobs", target, { limit: cfg().get<number>("importJobLimit") ?? 50 }, token),
       );
@@ -681,6 +702,9 @@ export class JobManager implements vscode.Disposable {
           }
           if (j.resource && existing.resource !== j.resource) {
             patch.resource = j.resource;
+          }
+          if (j.kind && existing.origin === "imported" && (existing.kind ?? "circuit") !== j.kind) {
+            patch.kind = j.kind;
           }
           if (Object.keys(patch).length) {
             await this.store.update(existing, patch);
@@ -700,6 +724,7 @@ export class JobManager implements vscode.Disposable {
           submittedAt: heappeTime(j.createdAt),
           origin: "imported",
           access,
+          kind: j.kind,
         });
       }
       // imported jobs from before ownership tracking that HEAppE no longer lists

@@ -14,6 +14,7 @@ stderr (shown in the "QaaS" output channel) and nothing can read the protocol st
 from __future__ import annotations
 
 import atexit
+import collections
 import contextlib
 import csv
 import json
@@ -180,6 +181,56 @@ def _attr(obj: Any, dotted: str) -> Any:
         return obj
     except Exception:
         return None
+
+
+_READOUT_LABEL = re.compile(r"^(?P<qubit>.+?)__(?P<creg>.+)_(?P<size>\d+)_(?P<idx>\d+)_(?P<bit>\d+)$")
+
+
+class _Memory:
+    """Minimal stand-in for a Qiskit Result: per-shot memory of one circuit."""
+
+    def __init__(self, memory: list[str]):
+        self._memory = memory
+
+    def get_memory(self, _index: int = 0) -> list[str]:
+        return self._memory
+
+
+def _sweep_memory(sweep: dict) -> tuple[list[str], dict]:
+    """Per-shot bitstrings from raw pulse-job readouts, without the compile context.
+
+    Readout labels look like ``QB1__c_2_0_1``: qubit, classical register ``c`` of size 2 (register
+    index 0), classical bit 1. Bitstrings follow Qiskit (rightmost = bit 0, registers separated by
+    spaces, last register leftmost). For sweeps, the shots of all sweep points are concatenated."""
+    import numpy as np
+
+    registers: dict[str, tuple[int, int]] = {}
+    columns = []
+    labels: dict[str, dict] = {}
+    shots = None
+    for label, arrays in sweep.items():
+        match = _READOUT_LABEL.match(label)
+        if not match:
+            raise ValueError(f"Unknown readout label {label!r}")
+        parts = arrays if isinstance(arrays, (list, tuple)) else [arrays]
+        values = np.concatenate([np.asarray(a, dtype=float).ravel() for a in parts])
+        if shots is None:
+            shots = len(values)
+        elif len(values) != shots:
+            raise ValueError("The readouts have different numbers of shots.")
+        creg, bit = match["creg"], int(match["bit"])
+        registers[creg] = (int(match["size"]), int(match["idx"]))
+        bits = (values > 0.5).astype(int)
+        columns.append((creg, bit, bits))
+        labels[label] = {"qubit": match["qubit"], "register": creg, "bit": bit, "p1": float(bits.mean())}
+    if not columns or not shots:
+        raise ValueError("The job has no readout results.")
+    table = {c: np.zeros((shots, size), dtype=int) for c, (size, _) in registers.items()}
+    for creg, bit, bits in columns:
+        table[creg][:, bit] = bits
+    order = sorted(registers, key=lambda c: registers[c][1], reverse=True)
+    memory = [" ".join("".join(map(str, table[c][i][::-1])) for c in order) for i in range(shots)]
+    return memory, {"readouts": labels, "recordedShots": shots}
 
 
 def _write_shots_csv(path: Path, job_id: str, result, circuits: int) -> None:
@@ -525,6 +576,7 @@ class Server:
                 "createdAt": _field(d, "creation_time", "CreationTime") or _field(d, "submit_time", "SubmitTime"),
                 "tasks": len(tasks),
                 "resource": _job_resource(tasks),
+                "kind": "pulse" if any("pulse" in str(_field(t, "name", "Name") or "") for t in tasks) else "circuit",
                 # without the user id, keep the old behaviour and treat every listed job as own
                 "own": own_ids is None or job_id in own_ids,
             }
@@ -750,6 +802,22 @@ class Server:
             "submittedAt": datetime.now(UTC).isoformat(),
         }
 
+    def _download_pulse_raw(self, p: dict, pulla) -> dict:
+        """Counts of a pulse job submitted elsewhere, rebuilt from its raw readouts."""
+        from uuid import UUID
+
+        sweep = pulla.executor.get_artifact_sweep_results(UUID(int=int(p["jobId"])))
+        try:
+            memory, summary = _sweep_memory(sweep)
+        except ValueError as exc:
+            raise BridgeError(f"Pulse job {p['jobId']}: {exc}") from exc
+        counts = [dict(collections.Counter(memory))]
+        raw = _pulse_raw_summary(p, summary)
+        with_meas = bool(p.get("withMeasurements"))
+        out = _write_results(p, counts, _Memory(memory), raw, with_meas)
+        out["note"] = raw["note"]
+        return out
+
     def downloadPulse(self, p: dict) -> dict:
         """Results of a finished pulse-level job, as counts (same files as circuit jobs).
 
@@ -764,17 +832,16 @@ class Server:
         if state != "FINISHED":
             raise BridgeError(f"Job {p['jobId']} is {state}; results are available once it is FINISHED.")
         shots = int(p.get("shots") or 0)
+        job_id = str(p["jobId"])
+        if not shots and job_id not in self._pulse_runs and not p.get("sources"):
+            return self._download_pulse_raw(p, self._pulla(p))
         if not shots:
             raise BridgeError("The number of shots of this pulse job is unknown.")
-        job_id = str(p["jobId"])
         run = self._pulse_runs.get(job_id)
         pulla = self._pulla(p)
         if run is None:
             if not p.get("sources"):
-                raise BridgeError(
-                    f"Pulse job {job_id} was submitted elsewhere; its circuits and operators are unknown, "
-                    "so the raw results cannot be mapped to classical bits."
-                )
+                return self._download_pulse_raw(p, pulla)
             pulla, run_definition, context, _ = self._compile_pulse({**p, "shots": shots})
             run = (run_definition, context)
             self._pulse_runs[job_id] = run
@@ -785,6 +852,17 @@ class Server:
         counts = result.get_counts()
         counts = counts if isinstance(counts, list) else [counts]
         return _write_results(p, counts, result, None, bool(p.get("withMeasurements")))
+
+
+def _pulse_raw_summary(p: dict, summary: dict) -> dict:
+    shots = int(p.get("shots") or 0)
+    recorded = summary["recordedShots"]
+    note = f"Counts rebuilt from the raw readouts ({recorded} recorded shots)."
+    if shots and recorded > shots and recorded % shots == 0:
+        note += f" The job swept {recorded // shots} points of {shots} shots; their shots are combined."
+    elif not shots:
+        note += " If the job was a parameter sweep, the shots of all sweep points are combined."
+    return {**summary, "note": note}
 
 
 def _check_loci(circuits, operators: list[dict], use: dict[str, str]) -> None:
