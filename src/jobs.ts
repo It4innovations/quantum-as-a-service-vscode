@@ -53,6 +53,40 @@ export interface JobRecord {
    * Administrator somewhere; its details and results are not accessible (HTTP 403).
    */
   access?: "own" | "foreign";
+  /** Last failed attempt to fetch results; cleared by a successful download. */
+  problem?: { message: string; at: string };
+}
+
+/** URI used to decorate (colour) a job's label in the Jobs view. */
+export const JOB_URI_SCHEME = "qaas-job";
+export function jobUri(r: { project: string; jobId: string; instance?: LexisInstance }): vscode.Uri {
+  return vscode.Uri.from({ scheme: JOB_URI_SCHEME, path: `/${encodeURIComponent(key(r))}` });
+}
+
+/** Colours the labels of jobs whose results could not be fetched (orange, with a ⚠ badge). */
+export class JobDecorationProvider implements vscode.FileDecorationProvider {
+  private readonly changed = new vscode.EventEmitter<vscode.Uri[] | undefined>();
+  readonly onDidChangeFileDecorations = this.changed.event;
+
+  constructor(private readonly store: JobStore) {
+    store.onDidChange(() => this.changed.fire(undefined));
+  }
+
+  provideFileDecoration(uri: vscode.Uri): vscode.FileDecoration | undefined {
+    if (uri.scheme !== JOB_URI_SCHEME) {
+      return undefined;
+    }
+    const k = decodeURIComponent(uri.path.slice(1));
+    const r = this.store.all().find((x) => key(x) === k);
+    if (!r?.problem) {
+      return undefined;
+    }
+    return new vscode.FileDecoration(
+      "!",
+      "Results could not be fetched",
+      new vscode.ThemeColor("list.warningForeground"),
+    );
+  }
 }
 
 /** Group node of the Jobs view. */
@@ -186,7 +220,10 @@ export class JobsTreeProvider implements vscode.TreeDataProvider<JobNode> {
     item.description = `${r.state.toLowerCase()} · #${r.jobId} · ${r.resource || r.backend || "?"}${r.kind === "pulse" ? " · pulse" : ""}${
       r.instance ? ` · LEXIS ${instanceLabel(r.instance)}` : ""
     }`;
-    item.iconPath = stateIcon(r.state);
+    item.iconPath = r.problem
+      ? new vscode.ThemeIcon("warning", new vscode.ThemeColor("list.warningForeground"))
+      : stateIcon(r.state);
+    item.resourceUri = jobUri(r);
     const done = TERMINAL.has(r.state);
     const unverified = needsAccessCheck(r);
     item.contextValue = [
@@ -220,6 +257,13 @@ export class JobsTreeProvider implements vscode.TreeDataProvider<JobNode> {
       ["Source", r.source],
       ["Results", r.downloadedTo],
     ];
+    if (r.problem) {
+      md.appendMarkdown(
+        `⚠ **Results could not be fetched** (${new Date(r.problem.at).toLocaleString()}):  \n${r.problem.message
+          .replace(/[\\`*_[\]]/g, "\\$&")
+          .slice(0, 400)}\n\n`,
+      );
+    }
     for (const [k, v] of rows) {
       if (v) {
         md.appendMarkdown(`${k}: \`${v}\`  \n`);
@@ -437,7 +481,7 @@ export class JobManager implements vscode.Disposable {
             token,
           ),
       );
-      const next = await this.store.update(r, { downloadedTo: res.directory, state: "FINISHED" });
+      const next = await this.store.update(r, { downloadedTo: res.directory, state: "FINISHED", problem: undefined });
       try {
         await this.analysis.writeExports(next, res.counts);
       } catch (e) {
@@ -465,7 +509,11 @@ export class JobManager implements vscode.Disposable {
         );
         return undefined;
       }
-      vscode.window.showErrorMessage(`QaaS: download of #${r.jobId} failed: ${(e as Error).message}`);
+      const message = (e as Error).message;
+      if ((e as { type?: string }).type !== "Restarted") {
+        await this.store.update(r, { problem: { message, at: new Date().toISOString() } });
+      }
+      vscode.window.showWarningMessage(`QaaS: results of #${r.jobId} could not be fetched: ${message}`);
       return undefined;
     }
   }

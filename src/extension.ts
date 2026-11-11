@@ -20,6 +20,7 @@ import { type EstimatorPreset, EstimatorViewProvider } from "./estimatorView";
 import {
   isForeign,
   isJob,
+  JobDecorationProvider,
   JobManager,
   type JobNode,
   type JobRecord,
@@ -368,6 +369,7 @@ export function activate(context: vscode.ExtensionContext): void {
     status,
     vscode.window.registerWebviewViewProvider(EstimatorViewProvider.viewId, estimator),
     vscode.window.createTreeView("qaas.calibrations", { treeDataProvider: calibrationTree }),
+    vscode.window.registerFileDecorationProvider(new JobDecorationProvider(store)),
     ...calibrationCommands.register(calibrationTree),
     vscode.languages.registerCodeLensProvider(
       [...(PYTHON_SELECTOR as vscode.DocumentFilter[]), ...(QASM_SELECTOR as vscode.DocumentFilter[])],
