@@ -13,6 +13,10 @@
     },
     {
       "name": "Ing. Jan Martinovič, Ph.D."
+    },
+    {
+      "name": "Claude Opus 5.5 (Anthropic)",
+      "url": "https://claude.com/claude-code"
     }
   ],
   "license": "Apache-2.0",
