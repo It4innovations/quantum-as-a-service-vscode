@@ -63,6 +63,8 @@ export interface JobGroup {
 export type JobNode = JobRecord | JobGroup;
 export const isJob = (n: unknown): n is JobRecord => typeof n === "object" && n !== null && "jobId" in n;
 export const isForeign = (r: JobRecord) => r.access === "foreign";
+/** Imported before ownership was tracked: may belong to another user until checked. */
+export const needsAccessCheck = (r: JobRecord) => r.origin === "imported" && r.access === undefined;
 
 /** HEAppE times have no zone and are UTC. */
 function heappeTime(t?: string): string {
@@ -183,14 +185,18 @@ export class JobsTreeProvider implements vscode.TreeDataProvider<JobNode> {
     }`;
     item.iconPath = stateIcon(r.state);
     const done = TERMINAL.has(r.state);
+    const unverified = needsAccessCheck(r);
     item.contextValue = [
       "job",
-      done ? "terminal" : "active",
-      r.state === "FINISHED" ? "finished" : "",
+      unverified ? "unverified" : done ? "terminal" : "active",
+      r.state === "FINISHED" && !unverified ? "finished" : "",
       r.downloadedTo ? "downloaded" : "",
     ]
       .filter(Boolean)
       .join(".");
+    if (unverified) {
+      item.description = `${item.description} · checking access…`;
+    }
     const md = new vscode.MarkdownString(undefined, true);
     md.appendMarkdown(`**${r.name || "Job"}** — ${r.state}\n\n`);
     const rows: [string, string | undefined][] = [
@@ -217,7 +223,7 @@ export class JobsTreeProvider implements vscode.TreeDataProvider<JobNode> {
       }
     }
     item.tooltip = md;
-    if (r.state === "FINISHED") {
+    if (r.state === "FINISHED" && !unverified) {
       item.command = { command: "qaas.jobs.showResults", title: "Show Results", arguments: [r] };
     }
     return item;
@@ -291,6 +297,7 @@ function groupTooltip(g: JobGroup): string {
 export class JobManager implements vscode.Disposable {
   private timer?: NodeJS.Timeout;
   readonly analysis: Analysis;
+  private checkingAccess = false;
   private polling = false;
 
   constructor(
@@ -521,6 +528,66 @@ export class JobManager implements vscode.Disposable {
     }
   }
 
+  /**
+   * Decide ownership of imported jobs whose access is unknown, without prompting: HEAppE's job
+   * list marks own jobs; jobs it does not return are probed (403 = another user's job).
+   * Runs only when signed in (token or a login in this session).
+   */
+  async checkAccess(): Promise<number> {
+    const unknown = this.store.all().filter(needsAccessCheck);
+    if (unknown.length === 0 || this.checkingAccess) {
+      return 0;
+    }
+    if (!this.bridge.authenticated && !(await lexisToken(this.secrets))) {
+      return 0;
+    }
+    this.checkingAccess = true;
+    let foreign = 0;
+    try {
+      const target = await currentTarget(this.secrets);
+      const listed = new Map<string, { own: boolean; resource?: string | null }>();
+      try {
+        const jobs = await this.bridge.call<{ jobId: string; own: boolean; resource?: string | null }[]>(
+          "listJobs",
+          target,
+          { limit: Math.max(cfg().get<number>("importJobLimit") ?? 50, unknown.length) },
+        );
+        for (const j of jobs) {
+          listed.set(j.jobId, j);
+        }
+      } catch (e) {
+        this.output.appendLine(`[jobs] access check: listing failed: ${(e as Error).message}`);
+      }
+      for (const r of unknown) {
+        const hit = listed.get(r.jobId);
+        let access: "own" | "foreign" | undefined = hit ? (hit.own ? "own" : "foreign") : undefined;
+        if (!access) {
+          try {
+            await this.bridge.call<JobInfo>("jobInfo", await this.targetFor(r), { jobId: r.jobId });
+            access = "own";
+          } catch (e) {
+            if (/HTTP 403/.test((e as Error).message)) {
+              access = "foreign";
+            } else {
+              this.output.appendLine(`[jobs] access check of ${r.jobId}: ${(e as Error).message}`);
+              continue;
+            }
+          }
+        }
+        if (access === "foreign") {
+          foreign++;
+        }
+        await this.store.update(r, { access, ...(hit?.resource ? { resource: hit.resource } : {}) });
+      }
+      this.output.appendLine(
+        `[jobs] access check: ${unknown.length} imported job(s) checked, ${foreign} of other users`,
+      );
+    } finally {
+      this.checkingAccess = false;
+    }
+    return foreign;
+  }
+
   /** Pull the user's job list from HEAppE, e.g. jobs submitted from scripts or notebooks. */
   async importFromHeappe(
     opts: { quiet?: boolean } = {},
@@ -584,6 +651,8 @@ export class JobManager implements vscode.Disposable {
           access,
         });
       }
+      // imported jobs from before ownership tracking that HEAppE no longer lists
+      await this.checkAccess();
       const foreign = jobs.filter((j) => !j.own).length;
       if (!opts.quiet) {
         vscode.window.showInformationMessage(
