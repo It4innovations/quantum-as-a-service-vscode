@@ -12,6 +12,8 @@
 - VLQ billed-time estimates above `backend.run(...)` in Python files and notebooks, in the submit confirmation, and in a sidebar estimator.
 - Python environments: discovery of venv, conda and pyenv interpreters; create a 3.12 venv or conda env; install qaas as a VS Code task.
 - Pulse-level operator catalog: `.qaas/operators/*.yaml` with JSON schema, Pulse Operators view, waveform editor with live preview and hardware checks, calibration entries per calibration set, migration (native-amplitude rescaling), pulse-level OpenQASM runs (`// @qaas operator prx=<name>`), pulse jobs in the Jobs view, Python code insertion, and a Rabi calibration notebook whose result is written back.
+- LEXIS test instance and other instances: `qaas.lexisAaiUrl` / `qaas.lexisApiUrl` / `qaas.lexisRealm`, or a git-ignored `.qaas/dev.env` with URLs, project, resource and token; refresh/offline tokens renewed automatically; jobs remember their instance; `QaaS: Test LEXIS Connection`; status bar marks non-production instances.
+- py4lexis log goes to the temp directory instead of `./lexis_logs.log`.
 - Tooling: Biome (TypeScript/JSON) and Ruff (Python) replace ESLint.
 
 ## 0.0.1

@@ -156,7 +156,7 @@ export class OperatorCatalog implements vscode.Disposable {
 
   private async infoKey(): Promise<string> {
     const t = await currentTarget(this.secrets);
-    return `qaas.pulseInfo:${t.project}|${t.resource}|${t.backend}`;
+    return `qaas.pulseInfo:${t.instance?.apiUrl ? `${t.instance.apiUrl}|` : ""}${t.project}|${t.resource}|${t.backend}`;
   }
 
   /** Last fetched calibration info for the configured backend (may be outdated). */
@@ -835,6 +835,7 @@ export class OperatorCommands {
       backend: t.backend,
       qubit,
       resultDirectory: vscode.Uri.joinPath(root, ".qaas", "calibrations").fsPath,
+      instance: t.instance,
     });
     const uri = vscode.Uri.joinPath(root, ".qaas", "notebooks", `${spec.name}_rabi_${sanitize(qubit)}.ipynb`);
     await vscode.workspace.fs.writeFile(uri, Buffer.from(nb, "utf8"));

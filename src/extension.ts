@@ -1,7 +1,17 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { Bridge } from "./bridge";
-import { cfg, currentTarget, requireProject, TOKEN_KEY } from "./config";
+import {
+  cfg,
+  currentTarget,
+  devEnvPath,
+  devOverrides,
+  lexisInstance,
+  requireProject,
+  TOKEN_KEY,
+  targetEnv,
+} from "./config";
+import { devEnvTemplate, instanceLabel } from "./core/devEnv";
 import { estimate, formatRange, formatSeconds } from "./core/estimate";
 import { createEnvironment, installQaas, selectInterpreter } from "./environments";
 import { detectCalls, EstimateCodeLensProvider, PYTHON_SELECTOR, QASM_SELECTOR } from "./estimateLens";
@@ -109,7 +119,12 @@ async function listBackends(context: vscode.ExtensionContext, bridge: Bridge): P
     })),
     { title: "Available quantum backends", placeHolder: "Select a default backend" },
   );
-  if (pick) {
+  const dev = devOverrides();
+  if (pick && (dev.QAAS_BACKEND_NAME || dev.QAAS_LEXIS_RESOURCE)) {
+    vscode.window.showInformationMessage(
+      `QaaS: ${path.basename(devEnvPath())} sets the backend/resource; edit it to use ${pick.backend.name}.`,
+    );
+  } else if (pick) {
     await cfg().update("backendName", pick.backend.name, vscode.ConfigurationTarget.Global);
     if (pick.backend.resource) {
       await cfg().update("lexisResource", pick.backend.resource, vscode.ConfigurationTarget.Global);
@@ -161,10 +176,7 @@ async function runPythonFile(context: vscode.ExtensionContext, uri?: vscode.Uri)
     }
   }
   const t = await currentTarget(context.secrets);
-  const env: Record<string, string> = { LEXIS_PROJECT: t.project, LEXIS_RESOURCE: t.resource, QAAS_BACKEND: t.backend };
-  if (t.token) {
-    env.LEXIS_TOKEN = t.token;
-  }
+  const env = targetEnv(t);
   const terminal = vscode.window.createTerminal({ name: "QaaS run", env });
   terminal.show();
   const python = await resolvePython();
@@ -179,11 +191,90 @@ async function runPythonFile(context: vscode.ExtensionContext, uri?: vscode.Uri)
 }
 
 function updateStatusBar(item: vscode.StatusBarItem): void {
-  const project = cfg().get<string>("lexisProject");
-  item.text = `$(pulse) ${cfg().get<string>("backendName") || "VLQ"}`;
-  item.tooltip = project
-    ? `QaaS: project ${project}. Click to choose a backend.`
-    : "QaaS: no LEXIS project set. Click to choose a backend.";
+  const dev = devOverrides();
+  const project = dev.QAAS_LEXIS_PROJECT || cfg().get<string>("lexisProject");
+  const backend = dev.QAAS_BACKEND_NAME || cfg().get<string>("backendName") || "VLQ";
+  const instance = lexisInstance(dev);
+  const label = instanceLabel(instance);
+  item.text = `$(pulse) ${backend}${label ? ` · LEXIS ${label}` : ""}`;
+  item.backgroundColor = label ? new vscode.ThemeColor("statusBarItem.warningBackground") : undefined;
+  const where = instance ? `LEXIS ${instance.apiUrl ?? instance.aaiUrl}` : "LEXIS production";
+  const fromFile = Object.keys(dev).length > 0 ? ` (overrides from ${path.basename(devEnvPath())})` : "";
+  item.tooltip = `QaaS: ${where}, project ${project || "not set"}${fromFile}. Click to choose a backend.`;
+}
+
+interface WhoAmI {
+  user?: string;
+  issuer?: string;
+  expiresAt?: string;
+  tokenKind: "login" | "refresh" | "access";
+}
+
+/** Log in to the current LEXIS instance and list backends, reporting each step in the output channel. */
+async function testConnection(context: vscode.ExtensionContext, bridge: Bridge): Promise<void> {
+  const target = await currentTarget(context.secrets);
+  const where = target.instance ? (target.instance.apiUrl ?? target.instance.aaiUrl) : "production";
+  output.show(true);
+  output.appendLine(
+    `[connection] LEXIS ${where} · project ${target.project || "(not set)"} · resource ${target.resource || "(auto)"} · backend ${target.backend}`,
+  );
+  try {
+    const result = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: `QaaS: connecting to LEXIS ${where}…`,
+        cancellable: true,
+      },
+      async (_p, token) => {
+        const me = await bridge.call<WhoAmI>("whoami", target, {}, token);
+        output.appendLine(
+          `[connection] logged in as ${me.user ?? "?"} (${me.tokenKind}; issuer ${me.issuer ?? "?"}; access token valid until ${me.expiresAt ?? "?"})`,
+        );
+        if (!target.project) {
+          return { me, backends: undefined };
+        }
+        const backends = await bridge.call<BackendInfo[]>("backends", target, {}, token);
+        for (const b of backends) {
+          output.appendLine(`[connection] backend ${b.name} · resource ${b.resource ?? "?"} · host ${b.host ?? "?"}`);
+        }
+        return { me, backends };
+      },
+    );
+    const n = result.backends?.length;
+    vscode.window.showInformationMessage(
+      `QaaS: connected to LEXIS ${where} as ${result.me.user ?? "?"}${
+        n === undefined ? " (no project set, backends not listed)" : `, ${n} backend${n === 1 ? "" : "s"} available`
+      }.`,
+    );
+  } catch (e) {
+    output.appendLine(`[connection] failed: ${(e as Error).message}`);
+    vscode.window.showErrorMessage(`QaaS: connection to LEXIS ${where} failed: ${(e as Error).message}`);
+  }
+}
+
+/** Open the developer connection file, creating it (and git-ignoring it) on first use. */
+async function openDevConnectionFile(): Promise<void> {
+  const uri = vscode.Uri.file(devEnvPath());
+  try {
+    await vscode.workspace.fs.stat(uri);
+  } catch {
+    await vscode.workspace.fs.writeFile(uri, Buffer.from(devEnvTemplate(), "utf8"));
+    const ignore = vscode.Uri.joinPath(uri, "..", ".gitignore");
+    let text = "";
+    try {
+      text = Buffer.from(await vscode.workspace.fs.readFile(ignore)).toString("utf8");
+    } catch {
+      // no .gitignore yet
+    }
+    const name = path.basename(uri.fsPath);
+    if (!text.split(/\r?\n/).includes(name)) {
+      await vscode.workspace.fs.writeFile(
+        ignore,
+        Buffer.from(`${text}${text && !text.endsWith("\n") ? "\n" : ""}${name}\n`, "utf8"),
+      );
+    }
+  }
+  await vscode.window.showTextDocument(uri);
 }
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -221,6 +312,14 @@ export function activate(context: vscode.ExtensionContext): void {
   updateStatusBar(status);
   status.show();
 
+  const devWatcher = vscode.workspace.createFileSystemWatcher(
+    new vscode.RelativePattern(vscode.Uri.file(path.dirname(devEnvPath())), path.basename(devEnvPath())),
+  );
+  const onDevChange = () => {
+    updateStatusBar(status);
+    void catalog.loadCachedInfo();
+  };
+
   /** Tree commands get (clicked, selection); fall back to the clicked item. */
   const sel = (item?: JobRecord, items?: JobRecord[]): JobRecord[] =>
     items && items.length > 0 ? items : item ? [item] : [...jobsView.selection];
@@ -255,6 +354,10 @@ export function activate(context: vscode.ExtensionContext): void {
         updateStatusBar(status);
       }
     }),
+    devWatcher,
+    devWatcher.onDidCreate(onDevChange),
+    devWatcher.onDidChange(onDevChange),
+    devWatcher.onDidDelete(onDevChange),
 
     // environment
     vscode.commands.registerCommand("qaas.checkEnvironment", () => checkEnvironment(bridge)),
@@ -262,10 +365,13 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("qaas.selectInterpreter", () => selectInterpreter()),
     vscode.commands.registerCommand("qaas.createEnvironment", () => createEnvironment()),
     vscode.commands.registerCommand("qaas.restartBridge", () => bridge.restart()),
+    vscode.commands.registerCommand("qaas.openDevConnection", () => openDevConnectionFile()),
+    vscode.commands.registerCommand("qaas.testConnection", () => testConnection(context, bridge)),
     vscode.commands.registerCommand("qaas.setToken", async () => {
       const token = await vscode.window.showInputBox({
-        title: "LEXIS access token",
-        prompt: "Stored in VS Code secret storage. Leave unset to log in through the browser instead.",
+        title: "LEXIS refresh or access token",
+        prompt:
+          "Stored in VS Code secret storage. A refresh/offline token is renewed automatically; an access token expires in minutes. Leave unset to log in through the browser.",
         password: true,
         ignoreFocusOut: true,
       });

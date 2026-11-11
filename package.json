@@ -4,6 +4,17 @@
   "description": "Run OpenQASM 3 and Qiskit circuits on the VLQ quantum computer through LEXIS and HEAppE: job manager, result downloads, billed-time estimates.",
   "version": "0.0.1",
   "publisher": "it4innovations",
+  "author": {
+    "name": "Ing. Jan Swiatkowski"
+  },
+  "contributors": [
+    {
+      "name": "Ing. Jan Swiatkowski"
+    },
+    {
+      "name": "Ing. Jan Martinovič, Ph.D."
+    }
+  ],
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -112,7 +123,18 @@
       },
       {
         "command": "qaas.setToken",
-        "title": "Set LEXIS Token",
+        "title": "Set LEXIS Token (Refresh or Access)",
+        "category": "QaaS"
+      },
+      {
+        "command": "qaas.testConnection",
+        "title": "Test LEXIS Connection",
+        "category": "QaaS",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "qaas.openDevConnection",
+        "title": "Open Dev Connection File (Test LEXIS Instance)",
         "category": "QaaS"
       },
       {
@@ -421,6 +443,16 @@
           "command": "qaas.operators.refreshCalibration",
           "when": "view == qaas.operators",
           "group": "navigation@2"
+        },
+        {
+          "command": "qaas.testConnection",
+          "when": "view == qaas.jobs",
+          "group": "9_connection@1"
+        },
+        {
+          "command": "qaas.openDevConnection",
+          "when": "view == qaas.jobs",
+          "group": "9_connection@2"
         }
       ],
       "view/item/context": [
@@ -595,6 +627,26 @@
           "default": "VLQ",
           "description": "Quantum backend name."
         },
+        "qaas.lexisAaiUrl": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "LEXIS authorization (Keycloak) URL. Empty uses production (`https://aai.lexis.tech`). `PY4LEXIS_AAI_URL` in the dev connection file takes precedence."
+        },
+        "qaas.lexisApiUrl": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "LEXIS Platform API URL. Empty uses production (`https://api.lexis.tech`). `PY4LEXIS_API_URL` in the dev connection file takes precedence."
+        },
+        "qaas.lexisRealm": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Keycloak realm for the LEXIS login. Empty uses the py4lexis default (`LEXIS_AAI_v2`)."
+        },
+        "qaas.devConnectionFile": {
+          "type": "string",
+          "default": "${workspaceFolder}/.qaas/dev.env",
+          "markdownDescription": "Developer connection file (dotenv). When it exists, its `PY4LEXIS_AAI_URL`, `PY4LEXIS_API_URL`, `PY4LEXIS_REALM`, `QAAS_LEXIS_PROJECT`, `QAAS_LEXIS_RESOURCE`, `QAAS_BACKEND_NAME` and `QAAS_LEXIS_TOKEN` override the settings and the stored token. Create it with **QaaS: Open Dev Connection File**."
+        },
         "qaas.defaultShots": {
           "type": "integer",
           "default": 1024,
@@ -645,7 +697,7 @@
         },
         "qaas.pulseSampleRate": {
           "type": "number",
-          "default": 2000000000.0,
+          "default": 2000000000,
           "description": "Drive sample rate (samples/s) for waveform previews until the calibration set has been fetched."
         },
         "qaas.calibrationMaxAgeMinutes": {

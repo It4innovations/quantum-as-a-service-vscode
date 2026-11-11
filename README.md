@@ -22,7 +22,9 @@ Status: ✅ available and tested · 🔶 available, not yet verified against liv
 | Feature | Status | Notes |
 | --- | --- | --- |
 | LEXIS browser login, kept for the whole VS Code session | 🔶 | The login URL is also offered as a notification (works on remote hosts) |
-| LEXIS token in VS Code secret storage | 🔶 | `QaaS: Set LEXIS Token` / `Clear LEXIS Token and Log Out` |
+| LEXIS token in VS Code secret storage | 🔶 | `QaaS: Set LEXIS Token` / `Clear LEXIS Token and Log Out`. A refresh/offline token is renewed automatically; an access token is used as is |
+| Other LEXIS instances (test instance) via settings or a git-ignored dev connection file | 🔶 | See [Testing against the LEXIS test instance](#testing-against-the-lexis-test-instance). Status bar shows `LEXIS test`; jobs remember their instance |
+| `QaaS: Test LEXIS Connection` | 🔶 | Logs in, shows the user and token expiry, lists backends |
 | List backends and choose the default | 🔶 | Status bar shows the current backend |
 | Topology view: qubit connectivity, calibration fidelities, chosen layout | 🗓️ | |
 | Remaining allocation in the status bar | 🗓️ | |
@@ -175,6 +177,10 @@ for budgeting). Submission latency of 3–15 s is not billed.
 | `qaas.lexisProject` | *(empty)* | LEXIS project identifier |
 | `qaas.lexisResource` | *(empty)* | LEXIS resource; empty lets the client choose |
 | `qaas.backendName` | `VLQ` | Backend name |
+| `qaas.lexisAaiUrl` | *(empty)* | LEXIS login (Keycloak) URL; empty is production `https://aai.lexis.tech` |
+| `qaas.lexisApiUrl` | *(empty)* | LEXIS Platform API URL; empty is production `https://api.lexis.tech` |
+| `qaas.lexisRealm` | *(empty)* | Keycloak realm; empty is the py4lexis default `LEXIS_AAI_v2` |
+| `qaas.devConnectionFile` | `${workspaceFolder}/.qaas/dev.env` | Dev connection file; when it exists it overrides the LEXIS settings and token |
 | `qaas.defaultShots` | `1024` | Shots for OpenQASM runs |
 | `qaas.confirmSubmit` | `true` | Confirm with the estimate before submitting |
 | `qaas.showEstimates` | `true` | Estimates above submissions in code |
@@ -188,7 +194,37 @@ for budgeting). Submission latency of 3–15 s is not billed.
 | `qaas.calibrationMaxAgeMinutes` | `60` | Pulse runs re-read the current calibration set when the cached one is older |
 
 Scripts started with **Run Python File on VLQ** get `LEXIS_PROJECT`, `LEXIS_RESOURCE`,
-`QAAS_BACKEND` and, if set, `LEXIS_TOKEN` as environment variables.
+`QAAS_BACKEND` and, if set, `LEXIS_TOKEN`, `PY4LEXIS_AAI_URL`, `PY4LEXIS_API_URL` and
+`PY4LEXIS_REALM` as environment variables.
+
+## Testing against the LEXIS test instance
+
+Run **QaaS: Open Dev Connection File**. It creates `.qaas/dev.env` (and adds it to
+`.qaas/.gitignore`) with these keys:
+
+```bash
+PY4LEXIS_AAI_URL=<login (Keycloak) URL of the instance>
+PY4LEXIS_API_URL=<LEXIS Platform API URL of the instance>
+PY4LEXIS_REALM=<Keycloak realm of the instance>
+QAAS_LEXIS_PROJECT=<test project>
+QAAS_LEXIS_RESOURCE=<test resource>
+# QAAS_BACKEND_NAME=VLQ
+QAAS_LEXIS_TOKEN=<refresh or offline token>
+```
+
+- Values in the file override the `qaas.*` settings and the stored token; changes apply to the
+  next request, no reload needed. Delete or rename the file to go back to production.
+- A **refresh/offline token** is exchanged for access tokens by py4lexis and renewed as they
+  expire. An access token works too but expires within minutes. Without a token, the browser
+  login opens on the test instance.
+- The status bar shows e.g. `VLQ · LEXIS test` on a warning background while the file points at a
+  non-production instance. Jobs record their instance, so test and production jobs can share the
+  Jobs view and are always refreshed against the right one.
+- **QaaS: Test LEXIS Connection** logs in, prints the user, token kind and expiry, and lists the
+  backends in the **QaaS** output channel.
+- Instead of the file, the URLs can be set with `qaas.lexisAaiUrl`, `qaas.lexisApiUrl` and
+  `qaas.lexisRealm` (e.g. in workspace settings), and the token with **Set LEXIS Token** or the
+  `QAAS_LEXIS_TOKEN` environment variable. Token order: dev file, secret storage, environment.
 
 ## How it works
 
@@ -215,6 +251,11 @@ npm run package        # build a .vsix
 Formatting and linting: [Biome](https://biomejs.dev/) for TypeScript, JavaScript and JSON;
 [Ruff](https://docs.astral.sh/ruff/) for Python. The workspace recommends both VS Code
 extensions and formats on save.
+
+## Authors
+
+- Ing. Jan Swiatkowski
+- Ing. Jan Martinovič, Ph.D.
 
 ## License
 

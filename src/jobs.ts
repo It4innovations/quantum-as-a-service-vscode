@@ -3,7 +3,8 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 import { Analysis } from "./analysis";
 import type { Bridge } from "./bridge";
-import { cfg, currentTarget, expandPath, sanitize, type Target, TOKEN_KEY } from "./config";
+import { cfg, currentTarget, expandPath, lexisInstance, lexisToken, sanitize, type Target } from "./config";
+import { instanceLabel, type LexisInstance } from "./core/devEnv";
 import { formatSeconds } from "./core/estimate";
 import type { Counts } from "./core/stats";
 import { ResultsPanel } from "./resultsPanel";
@@ -33,10 +34,17 @@ export interface JobRecord {
   kind?: "circuit" | "pulse";
   operators?: { name: string; gate: string; calibrationSetId: string; status: string }[];
   origin: "extension" | "imported";
+  /** LEXIS instance the job was submitted to; undefined for production. */
+  instance?: LexisInstance;
 }
 
 const STORE_KEY = "qaas.jobs";
-const key = (r: { project: string; jobId: string }) => `${r.project}:${r.jobId}`;
+const key = (r: { project: string; jobId: string; instance?: LexisInstance }) =>
+  `${r.instance?.apiUrl ? `${r.instance.apiUrl}|` : ""}${r.project}:${r.jobId}`;
+const sameInstance = (a?: LexisInstance, b?: LexisInstance) =>
+  (a?.aaiUrl ?? "") === (b?.aaiUrl ?? "") &&
+  (a?.apiUrl ?? "") === (b?.apiUrl ?? "") &&
+  (a?.realm ?? "") === (b?.realm ?? "");
 
 /** Job history in globalState, so it survives restarts and is shared across workspaces. */
 export class JobStore {
@@ -49,8 +57,8 @@ export class JobStore {
     return [...this.memento.get<JobRecord[]>(STORE_KEY, [])].sort((a, b) => b.submittedAt.localeCompare(a.submittedAt));
   }
 
-  get(project: string, jobId: string): JobRecord | undefined {
-    return this.all().find((r) => key(r) === key({ project, jobId }));
+  get(project: string, jobId: string, instance?: LexisInstance): JobRecord | undefined {
+    return this.all().find((r) => key(r) === key({ project, jobId, instance }));
   }
 
   async upsert(rec: JobRecord): Promise<void> {
@@ -60,7 +68,11 @@ export class JobStore {
   }
 
   async update(rec: JobRecord, patch: Partial<JobRecord>): Promise<JobRecord> {
-    const next = { ...(this.get(rec.project, rec.jobId) ?? rec), ...patch, updatedAt: new Date().toISOString() };
+    const next = {
+      ...(this.get(rec.project, rec.jobId, rec.instance) ?? rec),
+      ...patch,
+      updatedAt: new Date().toISOString(),
+    };
     await this.upsert(next);
     return next;
   }
@@ -107,7 +119,9 @@ export class JobsTreeProvider implements vscode.TreeDataProvider<JobRecord> {
   getTreeItem(r: JobRecord): vscode.TreeItem {
     const item = new vscode.TreeItem(r.name || `Job ${r.jobId}`);
     item.id = key(r);
-    item.description = `${r.state.toLowerCase()} · #${r.jobId} · ${r.backend || "?"}${r.kind === "pulse" ? " · pulse" : ""}`;
+    item.description = `${r.state.toLowerCase()} · #${r.jobId} · ${r.backend || "?"}${r.kind === "pulse" ? " · pulse" : ""}${
+      r.instance ? ` · LEXIS ${instanceLabel(r.instance)}` : ""
+    }`;
     item.iconPath = stateIcon(r.state);
     const done = TERMINAL.has(r.state);
     item.contextValue = [
@@ -122,6 +136,7 @@ export class JobsTreeProvider implements vscode.TreeDataProvider<JobRecord> {
     md.appendMarkdown(`**${r.name || "Job"}** — ${r.state}\n\n`);
     const rows: [string, string | undefined][] = [
       ["HEAppE job", r.jobId],
+      ["LEXIS", r.instance ? (r.instance.apiUrl ?? r.instance.aaiUrl) : undefined],
       ["Project", r.project],
       ["Resource", r.resource || "(auto)"],
       ["Backend", r.backend],
@@ -186,12 +201,14 @@ export class JobManager implements vscode.Disposable {
     clearInterval(this.timer);
   }
 
+  /** Target of a stored job. The current token is used only if it belongs to the job's LEXIS instance. */
   private async targetFor(r: JobRecord): Promise<Target> {
     return {
       project: r.project,
       resource: r.resource,
       backend: r.backend,
-      token: (await this.secrets.get(TOKEN_KEY)) || undefined,
+      token: sameInstance(r.instance, lexisInstance()) ? await lexisToken(this.secrets) : undefined,
+      instance: r.instance,
     };
   }
 
@@ -207,7 +224,7 @@ export class JobManager implements vscode.Disposable {
     if (active.length === 0) {
       return;
     }
-    if (!userInitiated && !this.bridge.authenticated && !(await this.secrets.get(TOKEN_KEY))) {
+    if (!userInitiated && !this.bridge.authenticated && !(await lexisToken(this.secrets))) {
       return;
     }
     this.polling = true;
@@ -384,7 +401,7 @@ export class JobManager implements vscode.Disposable {
       );
       let added = 0;
       for (const j of jobs) {
-        const existing = this.store.get(target.project, j.jobId);
+        const existing = this.store.get(target.project, j.jobId, target.instance);
         if (existing) {
           if (existing.state !== j.state) {
             await this.store.update(existing, { state: j.state });
@@ -398,6 +415,7 @@ export class JobManager implements vscode.Disposable {
           project: target.project,
           resource: target.resource,
           backend: target.backend,
+          instance: target.instance,
           state: j.state,
           circuits: j.tasks || undefined,
           submittedAt: j.createdAt ? new Date(j.createdAt).toISOString() : new Date(0).toISOString(),
