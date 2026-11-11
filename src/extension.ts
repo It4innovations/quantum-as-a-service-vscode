@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { Bridge } from "./bridge";
+import { CalibrationCommands, CalibrationStore, CalibrationsTreeProvider } from "./calibrations";
 import {
   cfg,
   currentTarget,
@@ -16,7 +17,16 @@ import { estimate, formatRange, formatSeconds } from "./core/estimate";
 import { createEnvironment, installQaas, selectInterpreter } from "./environments";
 import { detectCalls, EstimateCodeLensProvider, PYTHON_SELECTOR, QASM_SELECTOR } from "./estimateLens";
 import { type EstimatorPreset, EstimatorViewProvider } from "./estimatorView";
-import { JobManager, type JobRecord, JobStore, JobsTreeProvider, TERMINAL } from "./jobs";
+import {
+  isForeign,
+  isJob,
+  JobManager,
+  type JobNode,
+  type JobRecord,
+  JobStore,
+  JobsTreeProvider,
+  TERMINAL,
+} from "./jobs";
 import { OperatorCatalog, OperatorCommands, type OperatorNode, OperatorsTreeProvider } from "./operators";
 import { resolvePython } from "./python";
 import { QasmCommands, TRANSPILED_SCHEME, TranspiledContentProvider } from "./qasm";
@@ -208,6 +218,7 @@ async function synchronize(
   bridge: Bridge,
   jobs: JobManager,
   catalog: OperatorCatalog,
+  calibrations: CalibrationCommands,
 ): Promise<void> {
   if (!(await ensureEnvironment(bridge, output)) || !(await requireProject())) {
     return;
@@ -244,10 +255,13 @@ async function synchronize(
         progress.report({ message: "refreshing active jobs…" });
         await jobs.poll(true);
 
+        progress.report({ message: "reading the calibration set…" });
+        const cal = await calibrations.refreshCurrent(true);
+        if (cal) {
+          summary.push(`calibration set ${cal.calibrationSetId.slice(0, 8)}…`);
+        }
         if (catalog.valid().length > 0) {
-          progress.report({ message: "reading the calibration set…" });
-          const info = await catalog.refreshPulseInfo(token);
-          summary.push(`calibration set ${info.calibrationSetId.slice(0, 8)}…`);
+          await catalog.refreshPulseInfo(token);
         }
       },
     );
@@ -310,6 +324,9 @@ export function activate(context: vscode.ExtensionContext): void {
   });
   void catalog.loadCachedInfo();
   catalog.onDidChange(() => lens.refresh());
+  const calibrationStore = new CalibrationStore(context.globalState, context.globalStorageUri, store, catalog);
+  const calibrationTree = new CalibrationsTreeProvider(calibrationStore, context.secrets);
+  const calibrationCommands = new CalibrationCommands(context, calibrationStore, bridge, output);
 
   const jobsView = vscode.window.createTreeView("qaas.jobs", {
     treeDataProvider: tree,
@@ -317,7 +334,7 @@ export function activate(context: vscode.ExtensionContext): void {
     showCollapseAll: false,
   });
   const updateBadge = () => {
-    const active = store.all().filter((r) => !TERMINAL.has(r.state)).length;
+    const active = store.all().filter((r) => !TERMINAL.has(r.state) && !isForeign(r)).length;
     jobsView.badge = active ? { value: active, tooltip: `${active} active job${active === 1 ? "" : "s"}` } : undefined;
   };
   store.onDidChange(updateBadge);
@@ -337,8 +354,10 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   /** Tree commands get (clicked, selection); fall back to the clicked item. */
-  const sel = (item?: JobRecord, items?: JobRecord[]): JobRecord[] =>
-    items && items.length > 0 ? items : item ? [item] : [...jobsView.selection];
+  const sel = (item?: JobNode, items?: JobNode[]): JobRecord[] =>
+    (items && items.length > 0 ? items : item ? [item] : [...jobsView.selection]).filter(
+      (n): n is JobRecord => isJob(n) && !isForeign(n),
+    );
 
   context.subscriptions.push(
     output,
@@ -348,6 +367,8 @@ export function activate(context: vscode.ExtensionContext): void {
     estimator,
     status,
     vscode.window.registerWebviewViewProvider(EstimatorViewProvider.viewId, estimator),
+    vscode.window.createTreeView("qaas.calibrations", { treeDataProvider: calibrationTree }),
+    ...calibrationCommands.register(calibrationTree),
     vscode.languages.registerCodeLensProvider(
       [...(PYTHON_SELECTOR as vscode.DocumentFilter[]), ...(QASM_SELECTOR as vscode.DocumentFilter[])],
       lens,
@@ -377,7 +398,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
     // environment
     vscode.commands.registerCommand("qaas.checkEnvironment", () => ensureEnvironment(bridge, output, true)),
-    vscode.commands.registerCommand("qaas.sync", () => synchronize(context, bridge, jobs, catalog)),
+    vscode.commands.registerCommand("qaas.sync", () =>
+      synchronize(context, bridge, jobs, catalog, calibrationCommands),
+    ),
     vscode.commands.registerCommand("qaas.signIn", () => signIn(bridge, context.secrets, output)),
     vscode.commands.registerCommand("qaas.installPackage", () => installQaas()),
     vscode.commands.registerCommand("qaas.selectInterpreter", () => selectInterpreter()),
@@ -480,8 +503,9 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }),
     vscode.commands.registerCommand("qaas.jobs.clearFinished", () =>
-      store.remove(store.all().filter((r) => TERMINAL.has(r.state))),
+      store.remove(store.all().filter((r) => TERMINAL.has(r.state) && !isForeign(r))),
     ),
+    vscode.commands.registerCommand("qaas.jobs.clearForeign", () => store.remove(store.all().filter(isForeign))),
   );
 
   // Resume tracking jobs from earlier sessions (only polls without a login prompt).

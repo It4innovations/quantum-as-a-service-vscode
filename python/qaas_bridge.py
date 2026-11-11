@@ -94,6 +94,66 @@ def _forbidden(job_id: Any, exc: Exception) -> BridgeError | None:
     )
 
 
+_LOCUS_PART = re.compile(r"^[A-Z][A-Z-]*\d+(?:__[A-Z][A-Z-]*\d+)*$")
+
+
+def _split_metric_field(field: str) -> tuple[str, list[str]]:
+    """Split an IQM observation field into (metric, locus).
+
+    ``metrics.rb.prx.drag_crf.QB1.fidelity:par=d1`` -> (``metrics.rb.prx.drag_crf.fidelity:par=d1``, [``QB1``]);
+    ``metrics.irb.cz.crf_crf.QB4__COMPR1.fidelity`` -> (``metrics.irb.cz.crf_crf.fidelity``, [``QB4``, ``COMPR1``]).
+    Fields without a component part keep an empty locus."""
+    parts = field.split(".")
+    for i, part in enumerate(parts):
+        if _LOCUS_PART.match(part):
+            return ".".join(parts[:i] + parts[i + 1 :]), part.split("__")
+    return field, []
+
+
+def _normalize_metrics(raw: dict) -> dict:
+    observations = []
+    for o in raw.get("observations") or []:
+        field = o.get("dut_field") or ""
+        value = o.get("value")
+        if not field or not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        metric, locus = _split_metric_field(field)
+        observations.append(
+            {
+                "metric": metric,
+                "locus": locus,
+                "value": float(value),
+                "uncertainty": float(o["uncertainty"]) if isinstance(o.get("uncertainty"), (int, float)) else None,
+                "unit": o.get("unit") or "",
+                "invalid": bool(o.get("invalid")),
+            }
+        )
+    return {
+        "calibrationSetId": str(raw.get("describes_id") or ""),
+        "dutLabel": raw.get("dut_label"),
+        "createdAt": raw.get("created_timestamp"),
+        "invalid": bool(raw.get("invalid")),
+        "observationSetId": raw.get("observation_set_id"),
+        "observations": observations,
+    }
+
+
+def _field(d: dict, snake: str, pascal: str) -> Any:
+    """py4heappe models serialize to snake_case; raw HEAppE JSON uses PascalCase."""
+    return d.get(snake, d.get(pascal))
+
+
+def _job_resource(tasks: list) -> str | None:
+    """LEXIS resource / HEAppE project of a job (e.g. VLQ-EU), from its first task's node type."""
+    for t in tasks:
+        node = _field(t, "node_type", "NodeType") or {}
+        project = _field(node, "project", "Project") or {}
+        name = _field(project, "accounting_string", "AccountingString") or _field(project, "name", "Name")
+        if name:
+            return str(name)
+    return None
+
+
 def _dumps_qasm3(circuit) -> str:
     """OpenQASM 3 text of a transpiled circuit. Native gates without a Qiskit definition
     (IQM's ``move`` on VLQ's resonator) are declared as basis gates instead of failing."""
@@ -431,36 +491,44 @@ class Server:
             return None
 
     def listJobs(self, p: dict) -> list[dict]:
+        """Jobs HEAppE lists for the signed-in user, each marked ``own`` or not.
+
+        ListJobsForCurrentUser returns every user's jobs when the user is a Manager or Administrator
+        in any HEAppE group, but only the submitter (or a project Administrator) can read them. Own
+        jobs are those returned with ``UserId`` = the signed-in HEAppE user."""
         from qheappe_client.utils import HEAppEJobState
 
         qclient = self._backend(p)._qclient
         api = qclient.job_management_api
         if api is None:
             raise BridgeError("HEAppE job management API is not available for this backend.")
-        # ListJobsForCurrentUser returns every user's jobs when the user is a Manager or Administrator
-        # in any HEAppE group; filter by the signed-in user's HEAppE id to import only their own jobs.
-        kwargs: dict[str, Any] = {"SessionCode": "", "Limit": int(p.get("limit", 50))}
+        limit = int(p.get("limit", 50))
+        listed = api.heappe_job_management_list_jobs_for_current_user_get(SessionCode="", Limit=limit)
         user_id = self._heappe_user_id(qclient)
+        own_ids: set[str] | None = None
+        mine = []
         if user_id is not None:
-            kwargs["UserId"] = user_id
-        jobs = api.heappe_job_management_list_jobs_for_current_user_get(**kwargs)
-        out = []
-        for job in jobs or []:
+            mine = api.heappe_job_management_list_jobs_for_current_user_get(SessionCode="", Limit=limit, UserId=user_id)
+            own_ids = {str(_field(_jsonable(j), "id", "Id")) for j in mine or []}
+        jobs: dict[str, dict] = {}
+        for job in [*(listed or []), *(mine or [])]:
             d = _jsonable(job)
-            # py4heappe models serialize to snake_case; raw HEAppE JSON uses PascalCase
-            get = lambda snake, pascal, d=d: d.get(snake, d.get(pascal))  # noqa: E731
-            out.append(
-                {
-                    "jobId": str(get("id", "Id")),
-                    "name": get("name", "Name"),
-                    "state": HEAppEJobState.readable(
-                        get("state", "State") if get("state", "State") is not None else -1
-                    ),
-                    "createdAt": get("creation_time", "CreationTime") or get("submit_time", "SubmitTime"),
-                    "tasks": len(get("tasks", "Tasks") or []),
-                }
-            )
-        return out
+            job_id = str(_field(d, "id", "Id"))
+            if job_id in jobs:
+                continue
+            state = _field(d, "state", "State")
+            tasks = _field(d, "tasks", "Tasks") or []
+            jobs[job_id] = {
+                "jobId": job_id,
+                "name": _field(d, "name", "Name"),
+                "state": HEAppEJobState.readable(state if state is not None else -1),
+                "createdAt": _field(d, "creation_time", "CreationTime") or _field(d, "submit_time", "SubmitTime"),
+                "tasks": len(tasks),
+                "resource": _job_resource(tasks),
+                # without the user id, keep the old behaviour and treat every listed job as own
+                "own": own_ids is None or job_id in own_ids,
+            }
+        return sorted(jobs.values(), key=lambda j: j["createdAt"] or "", reverse=True)
 
     def cancel(self, p: dict) -> bool:
         # QJob.cancel() in qaas 1.0.0 calls the coroutine QClient.cancel_job without awaiting it,
@@ -571,6 +639,27 @@ class Server:
             return qaas_pulse.generate_usage_code(p["operators"], p.get("use") or {}, p.get("note") or "")
         except qaas_pulse.OperatorError as exc:
             raise BridgeError(str(exc)) from exc
+
+    def calibrationMetrics(self, p: dict) -> dict:
+        """Quality metrics of a calibration set (current one when p['calibrationSetId'] is empty)."""
+        cal = p.get("calibrationSetId") or None
+        qclient = self._backend(p)._qclient
+        try:
+            raw = qclient.get_machine_metrics(calibration_set_id=cal)
+        except Exception as exc:
+            if "calibration_set_not_found" in str(exc):
+                raise BridgeError(
+                    f"Calibration set {cal} is not available on {p.get('backend') or 'this backend'}; "
+                    "the quantum computer no longer serves it."
+                ) from exc
+            raise
+        if not isinstance(raw, dict):
+            raise BridgeError("The backend returned no calibration metrics.")
+        out = _normalize_metrics(raw)
+        out["backend"] = p.get("backend")
+        out["current"] = cal is None
+        out["fetchedAt"] = datetime.now(UTC).isoformat()
+        return out
 
     def pulseInfo(self, p: dict) -> dict:
         """Current calibration set, native prx calibration per qubit and drive channel limits."""

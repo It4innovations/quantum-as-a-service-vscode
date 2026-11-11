@@ -60,6 +60,10 @@
           "name": "Jobs"
         },
         {
+          "id": "qaas.calibrations",
+          "name": "Calibrations"
+        },
+        {
           "id": "qaas.operators",
           "name": "Pulse Operators"
         },
@@ -78,6 +82,10 @@
       {
         "view": "qaas.jobs",
         "contents": "No jobs yet. Synchronize to sign in to the LEXIS Platform and import your jobs from HEAppE.\n[$(sync) Synchronize with LEXIS Platform](command:qaas.sync)\nSign in with the browser or a refresh/access token. [Sign in to LEXIS…](command:qaas.signIn)\nOr run an OpenQASM file: [New OpenQASM 3 File](command:qaas.newQasmFile)"
+      },
+      {
+        "view": "qaas.calibrations",
+        "contents": "Calibration sets of the current backend appear here: the current one, and those used by your jobs and operators.\n[$(refresh) Fetch Current Calibration Set](command:qaas.calibrations.refresh)\n[Open Calibration Set by ID…](command:qaas.calibrations.add)"
       }
     ],
     "languages": [
@@ -330,6 +338,45 @@
         "title": "Calibrate with Rabi Notebook…",
         "category": "QaaS",
         "icon": "$(beaker)"
+      },
+      {
+        "command": "qaas.calibrations.refresh",
+        "title": "Fetch Current Calibration Set",
+        "category": "QaaS",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "qaas.calibrations.add",
+        "title": "Open Calibration Set by ID…",
+        "category": "QaaS",
+        "icon": "$(add)"
+      },
+      {
+        "command": "qaas.calibrations.open",
+        "title": "Show Calibration",
+        "category": "QaaS",
+        "icon": "$(graph)"
+      },
+      {
+        "command": "qaas.calibrations.copyId",
+        "title": "Copy Calibration Set ID",
+        "category": "QaaS"
+      },
+      {
+        "command": "qaas.calibrations.export",
+        "title": "Export Calibration as CSV…",
+        "category": "QaaS"
+      },
+      {
+        "command": "qaas.calibrations.reload",
+        "title": "Fetch Again",
+        "category": "QaaS"
+      },
+      {
+        "command": "qaas.jobs.clearForeign",
+        "title": "Remove Other Users' Jobs from the List",
+        "category": "QaaS",
+        "icon": "$(clear-all)"
       }
     ],
     "menus": {
@@ -405,6 +452,26 @@
         {
           "command": "qaas.runQasmWithOperator",
           "when": "resourceLangId == openqasm || resourceExtname == .qasm"
+        },
+        {
+          "command": "qaas.calibrations.open",
+          "when": "false"
+        },
+        {
+          "command": "qaas.calibrations.copyId",
+          "when": "false"
+        },
+        {
+          "command": "qaas.calibrations.export",
+          "when": "false"
+        },
+        {
+          "command": "qaas.calibrations.reload",
+          "when": "false"
+        },
+        {
+          "command": "qaas.jobs.clearForeign",
+          "when": "false"
         }
       ],
       "editor/title/run": [
@@ -480,6 +547,16 @@
           "command": "qaas.signIn",
           "when": "view == qaas.jobs",
           "group": "9_connection@0"
+        },
+        {
+          "command": "qaas.calibrations.refresh",
+          "when": "view == qaas.calibrations",
+          "group": "navigation@1"
+        },
+        {
+          "command": "qaas.calibrations.add",
+          "when": "view == qaas.calibrations",
+          "group": "navigation@2"
         }
       ],
       "view/item/context": [
@@ -525,12 +602,12 @@
         },
         {
           "command": "qaas.jobs.copyId",
-          "when": "view == qaas.jobs",
+          "when": "view == qaas.jobs && viewItem =~ /^job\\./",
           "group": "2_manage@2"
         },
         {
           "command": "qaas.jobs.remove",
-          "when": "view == qaas.jobs",
+          "when": "view == qaas.jobs && viewItem =~ /^job\\./",
           "group": "2_manage@3"
         },
         {
@@ -612,6 +689,36 @@
           "command": "qaas.operators.deleteEntry",
           "when": "view == qaas.operators && viewItem =~ /^calibration\\./",
           "group": "9_delete@1"
+        },
+        {
+          "command": "qaas.calibrations.open",
+          "when": "view == qaas.calibrations && viewItem =~ /^calset/",
+          "group": "inline"
+        },
+        {
+          "command": "qaas.calibrations.open",
+          "when": "view == qaas.calibrations && viewItem =~ /^calset/",
+          "group": "1_open@1"
+        },
+        {
+          "command": "qaas.calibrations.export",
+          "when": "view == qaas.calibrations && viewItem =~ /^calset/",
+          "group": "2_export@1"
+        },
+        {
+          "command": "qaas.calibrations.copyId",
+          "when": "view == qaas.calibrations && viewItem =~ /^calset/",
+          "group": "3_copy@1"
+        },
+        {
+          "command": "qaas.calibrations.reload",
+          "when": "view == qaas.calibrations && viewItem =~ /^calset/",
+          "group": "4_reload@1"
+        },
+        {
+          "command": "qaas.jobs.clearForeign",
+          "when": "view == qaas.jobs && viewItem == jobGroupForeign",
+          "group": "inline"
         }
       ]
     },

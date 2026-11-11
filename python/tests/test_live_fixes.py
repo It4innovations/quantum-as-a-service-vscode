@@ -131,5 +131,74 @@ class ForbiddenJobTests(unittest.TestCase):
         self.assertIsNone(qaas_bridge._forbidden("1", RuntimeError("HTTP 404: not found")))
 
 
+class CalibrationMetricsTests(unittest.TestCase):
+    def test_split_metric_field(self):
+        split = qaas_bridge._split_metric_field
+        self.assertEqual(split("characterization.model.QB14.t1_time"), ("characterization.model.t1_time", ["QB14"]))
+        self.assertEqual(
+            split("metrics.rb.prx.drag_crf.QB1.fidelity:par=d1"), ("metrics.rb.prx.drag_crf.fidelity:par=d1", ["QB1"])
+        )
+        self.assertEqual(
+            split("metrics.irb.cz.crf_crf.QB4__COMPR1.fidelity"), ("metrics.irb.cz.crf_crf.fidelity", ["QB4", "COMPR1"])
+        )
+        self.assertEqual(split("metrics.global.value"), ("metrics.global.value", []))
+
+    def test_normalize_skips_non_numeric(self):
+        out = qaas_bridge._normalize_metrics(
+            {
+                "describes_id": "abc",
+                "observations": [
+                    {
+                        "dut_field": "characterization.model.QB1.t1_time",
+                        "value": 3e-5,
+                        "unit": "s",
+                        "uncertainty": 1e-6,
+                    },
+                    {"dut_field": "characterization.model.QB1.label", "value": "x"},
+                ],
+            }
+        )
+        self.assertEqual(out["calibrationSetId"], "abc")
+        self.assertEqual(len(out["observations"]), 1)
+        self.assertEqual(out["observations"][0]["locus"], ["QB1"])
+
+
+class OwnJobsTests(unittest.TestCase):
+    def _job(self, job_id, project):
+        job = mock.Mock()
+        job.to_dict.return_value = {
+            "id": job_id,
+            "name": f"job{job_id}",
+            "state": 16,
+            "creation_time": f"2026-11-11 10:{job_id % 60:02d}:00",
+            "tasks": [{"id": job_id, "node_type": {"project": {"name": project, "accounting_string": project}}}],
+        }
+        return job
+
+    def test_jobs_are_marked_own_or_foreign_with_resource(self):
+        api = mock.Mock()
+
+        def listing(**kwargs):
+            if kwargs.get("UserId") == 9:
+                return [self._job(455, "VLQ-EU")]
+            return [self._job(456, "VLQ-CZ"), self._job(455, "VLQ-EU")]
+
+        api.heappe_job_management_list_jobs_for_current_user_get.side_effect = listing
+        server = FakeServer(types.SimpleNamespace(job_management_api=api))
+        server._heappe_user_id = lambda qclient: 9
+        jobs = {j["jobId"]: j for j in server.listJobs({**TARGET, "limit": 10})}
+        self.assertTrue(jobs["455"]["own"])
+        self.assertFalse(jobs["456"]["own"])
+        self.assertEqual(jobs["456"]["resource"], "VLQ-CZ")
+        self.assertEqual(jobs["455"]["resource"], "VLQ-EU")
+
+    def test_without_user_id_everything_counts_as_own(self):
+        api = mock.Mock()
+        api.heappe_job_management_list_jobs_for_current_user_get.return_value = [self._job(1, "VLQ-EU")]
+        server = FakeServer(types.SimpleNamespace(job_management_api=api))
+        server._heappe_user_id = lambda qclient: None
+        self.assertTrue(server.listJobs({**TARGET, "limit": 10})[0]["own"])
+
+
 if __name__ == "__main__":
     unittest.main()
