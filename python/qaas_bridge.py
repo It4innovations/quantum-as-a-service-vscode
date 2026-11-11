@@ -80,6 +80,20 @@ def _is_outdated(version: str | None) -> bool:
     return release < MIN_QAAS or (release == MIN_QAAS and pre)
 
 
+def _forbidden(job_id: Any, exc: Exception) -> BridgeError | None:
+    """Readable error for HEAppE's 403 on a job (the signed-in HEAppE user is not its submitter)."""
+    text = str(exc)
+    if "HTTP 403" not in text:
+        return None
+    match = re.search(r"Request ID: (\w+)", text)
+    request = f", request ID {match.group(1)}" if match else ""
+    return BridgeError(
+        f"HEAppE refuses access to job {job_id} for the signed-in user (HTTP 403{request}). HEAppE only allows "
+        "the job's submitter or a project administrator. If the job was submitted with another LEXIS account or "
+        "instance, sign in with that one; if it is yours, report the request ID to the HEAppE administrators."
+    )
+
+
 def _dumps_qasm3(circuit) -> str:
     """OpenQASM 3 text of a transpiled circuit. Native gates without a Qiskit definition
     (IQM's ``move`` on VLQ's resonator) are declared as basis gates instead of failing."""
@@ -387,7 +401,12 @@ class Server:
     def jobInfo(self, p: dict) -> dict:
         from qheappe_client.utils import HEAppEJobState
 
-        info = self._backend(p)._qclient.get_job_info(int(p["jobId"]))
+        try:
+            info = self._backend(p)._qclient.get_job_info(int(p["jobId"]))
+        except Exception as exc:
+            if problem := _forbidden(p["jobId"], exc):
+                raise problem from exc
+            raise
         return {
             "state": HEAppEJobState.readable(info.get("State", -1)),
             "name": info.get("Name"),
@@ -441,7 +460,12 @@ class Server:
             raise BridgeError(f"Job {p['jobId']} is {state}; results are available once it is FINISHED.")
         job = self._job(p)
         with_meas = bool(p.get("withMeasurements"))
-        result = job.result(qiskit_legacy=True, with_measurements=with_meas)
+        try:
+            result = job.result(qiskit_legacy=True, with_measurements=with_meas)
+        except Exception as exc:
+            if problem := _forbidden(p["jobId"], exc):
+                raise problem from exc
+            raise
         counts = result.get_counts()
         counts = counts if isinstance(counts, list) else [counts]
 
