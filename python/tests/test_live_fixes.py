@@ -116,5 +116,20 @@ class OldPythonStartupTests(unittest.TestCase):
                 self.assertNotIn("UTC", [a.name for a in node.names], "datetime.UTC needs Python 3.11")
 
 
+class ForbiddenJobTests(unittest.TestCase):
+    def test_403_becomes_a_readable_error_with_request_id(self):
+        exc = RuntimeError(
+            "GET https://x/heappe/JobManagement/CurrentInfoForJob -> HTTP 403: "
+            "{\"detail\":\"Logged user 'u' is not authorized to query job info '456'. (Request ID: 12042ee3)\"}"
+        )
+        problem = qaas_bridge._forbidden("456", exc)
+        self.assertIsInstance(problem, qaas_bridge.BridgeError)
+        self.assertIn("job 456", str(problem))
+        self.assertIn("request ID 12042ee3", str(problem))
+
+    def test_other_errors_pass_through(self):
+        self.assertIsNone(qaas_bridge._forbidden("1", RuntimeError("HTTP 404: not found")))
+
+
 if __name__ == "__main__":
     unittest.main()
