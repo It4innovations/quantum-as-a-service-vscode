@@ -510,6 +510,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // Resume tracking jobs from earlier sessions (only polls without a login prompt).
   void jobs.poll(false);
+  // Sort imported jobs into own / other users' as soon as a sign-in exists (no prompt).
+  void jobs.checkAccess();
+  context.subscriptions.push(bridge.onDidAuthenticate(() => void jobs.checkAccess()));
 }
 
 export function deactivate(): void {}

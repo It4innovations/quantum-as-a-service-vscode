@@ -49,6 +49,9 @@ export class Bridge implements vscode.Disposable {
   authenticated = false;
   /** True once the environment check passed for this process (Python 3.12 with qaas). */
   environmentOk = false;
+  private readonly authenticatedEmitter = new vscode.EventEmitter<void>();
+  /** Fires when a login-requiring call first succeeds in this bridge process. */
+  readonly onDidAuthenticate = this.authenticatedEmitter.event;
 
   constructor(
     private readonly extensionPath: string,
@@ -68,8 +71,9 @@ export class Bridge implements vscode.Disposable {
     });
     proc.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
     const value = await result;
-    if (AUTH_METHODS.has(method)) {
+    if (AUTH_METHODS.has(method) && !this.authenticated) {
       this.authenticated = true;
+      this.authenticatedEmitter.fire();
     }
     return value;
   }
