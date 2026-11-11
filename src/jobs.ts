@@ -13,7 +13,7 @@ import {
   sanitize,
   type Target,
 } from "./config";
-import { instanceLabel, type LexisInstance } from "./core/devEnv";
+import { instanceLabel, type LexisInstance, normalizeInstance } from "./core/devEnv";
 import { formatSeconds } from "./core/estimate";
 import type { Counts } from "./core/stats";
 import { ResultsPanel } from "./resultsPanel";
@@ -91,7 +91,10 @@ export class JobStore {
   constructor(private readonly memento: vscode.Memento) {}
 
   all(): JobRecord[] {
-    return [...this.memento.get<JobRecord[]>(STORE_KEY, [])].sort((a, b) => b.submittedAt.localeCompare(a.submittedAt));
+    return this.memento
+      .get<JobRecord[]>(STORE_KEY, [])
+      .map((r) => (r.instance ? { ...r, instance: normalizeInstance(r.instance) } : r))
+      .sort((a, b) => b.submittedAt.localeCompare(a.submittedAt));
   }
 
   get(project: string, jobId: string, instance?: LexisInstance): JobRecord | undefined {
