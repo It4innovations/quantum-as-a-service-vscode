@@ -6,6 +6,8 @@
 
 export const PRODUCTION_AAI_URL = "https://aai.lexis.tech";
 export const PRODUCTION_API_URL = "https://api.lexis.tech";
+/** py4lexis's default Keycloak realm (production). */
+export const PRODUCTION_REALM = "LEXIS_AAI_v2";
 
 /** Keys understood in the dev file (same names as the environment variables py4lexis reads). */
 export const DEV_KEYS = [
@@ -61,7 +63,7 @@ export function normalizeInstance(i: LexisInstance): LexisInstance | undefined {
   const out: LexisInstance = {
     aaiUrl: aaiUrl === PRODUCTION_AAI_URL ? undefined : aaiUrl,
     apiUrl: apiUrl === PRODUCTION_API_URL ? undefined : apiUrl,
-    realm: i.realm?.trim() || undefined,
+    realm: i.realm?.trim() === PRODUCTION_REALM ? undefined : i.realm?.trim() || undefined,
   };
   return out.aaiUrl || out.apiUrl || out.realm ? out : undefined;
 }

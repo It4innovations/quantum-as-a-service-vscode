@@ -22,6 +22,16 @@ not a line
 test("normalizeInstance drops production URLs and trailing slashes", () => {
   assert.equal(normalizeInstance({ aaiUrl: "https://aai.lexis.tech/", apiUrl: "https://api.lexis.tech" }), undefined);
   assert.equal(normalizeInstance({ aaiUrl: "", apiUrl: " " }), undefined);
+  assert.equal(
+    normalizeInstance({ aaiUrl: "https://aai.lexis.tech", apiUrl: "https://api.lexis.tech", realm: "LEXIS_AAI_v2" }),
+    undefined,
+    "production spelled out explicitly, including its realm, is still production",
+  );
+  assert.deepEqual(normalizeInstance({ realm: "LEXIS_AAI_v2_TEST" }), {
+    aaiUrl: undefined,
+    apiUrl: undefined,
+    realm: "LEXIS_AAI_v2_TEST",
+  });
   assert.deepEqual(
     normalizeInstance({ aaiUrl: "https://aai.staging.example.org/", apiUrl: "https://api.staging.example.org" }),
     {
