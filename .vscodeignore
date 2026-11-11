@@ -12,3 +12,6 @@ tsconfig.json
 .vscode-test.mjs
 **/__pycache__/**
 test-fixtures/**
+qaas-results/**
+.qaas/**
+lexis_logs.log
