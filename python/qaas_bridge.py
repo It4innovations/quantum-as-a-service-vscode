@@ -557,6 +557,14 @@ class Server:
         except Exception as exc:
             if problem := _forbidden(p["jobId"], exc):
                 raise problem from exc
+            text = str(exc)
+            if "measurement_counts" in text and "404" in text:
+                raise BridgeError(
+                    f"HEAppE has no circuit results (measurement counts) for job {p['jobId']}. It is probably a "
+                    "pulse-level job (QPulla, e.g. named qpulla_job): its raw results can only be turned into counts "
+                    "with the circuits and settings it was compiled with, which are known only to the session that "
+                    "submitted it."
+                ) from exc
             raise
         counts = result.get_counts()
         counts = counts if isinstance(counts, list) else [counts]

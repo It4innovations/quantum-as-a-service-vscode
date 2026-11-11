@@ -200,5 +200,20 @@ class OwnJobsTests(unittest.TestCase):
         self.assertTrue(server.listJobs({**TARGET, "limit": 10})[0]["own"])
 
 
+class MissingCircuitResultsTests(unittest.TestCase):
+    def test_pulse_job_downloaded_as_circuit_job_is_explained(self):
+        server = qaas_bridge.Server()
+        server.jobInfo = lambda p: {"state": "FINISHED"}
+        job = mock.Mock()
+        job.result.side_effect = RuntimeError(
+            "Failed to fetch task artifact 'measurement_counts': GET https://x/heappe/QScheduler/GetTaskArtifact "
+            "-> HTTP 404: QSchedulerResourceNotFound"
+        )
+        server._job = lambda p: job
+        with self.assertRaises(qaas_bridge.BridgeError) as ctx:
+            server.download({**TARGET, "jobId": "134", "shots": 1000, "directory": "/tmp/x"})
+        self.assertIn("pulse-level job", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
