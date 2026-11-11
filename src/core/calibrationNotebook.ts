@@ -104,7 +104,21 @@ ${instanceLines(i.instance)}`,
     { cell_type: "markdown", source: "## Connect and read the native gate" },
     {
       cell_type: "code",
-      source: `provider = QProvider(LEXIS_PROJECT, **({"lexis_api_url": LEXIS_API_URL} if LEXIS_API_URL else {}))
+      source: `def lexis_token():
+    """LEXIS_TOKEN from the environment (access or refresh token), or None for the browser login."""
+    token = os.environ.get("LEXIS_TOKEN") or None
+    if token and token.count(".") == 2:
+        import base64
+
+        claims = json.loads(base64.urlsafe_b64decode(token.split(".")[1] + "=="))
+        if claims.get("typ") in ("Refresh", "Offline"):
+            from py4lexis.session import LexisSession
+
+            token = LexisSession(login_method="token", refresh_token=token).get_access_token()
+    return token
+
+
+provider = QProvider(LEXIS_PROJECT, token=lexis_token(), **({"lexis_api_url": LEXIS_API_URL} if LEXIS_API_URL else {}))
 pulla = provider.get_pulla(RESOURCE, BACKEND)
 compiler = pulla.get_qiskit_compiler()
 register_qaas_operators(compiler)
@@ -159,13 +173,22 @@ def excited_probability(result):
     return np.atleast_1d(np.asarray(ds[names[0]].values, dtype=float))
 
 
-def peak_amplitude(amplitudes, probabilities):
-    i = int(np.argmax(probabilities))
-    if 0 < i < len(amplitudes) - 1:
-        a, b, _ = np.polyfit(amplitudes[i - 1 : i + 2], probabilities[i - 1 : i + 2], 2)
-        if a < 0:
-            return float(np.clip(-b / (2 * a), amplitudes[i - 1], amplitudes[i + 1]))
-    return float(amplitudes[i])
+def rabi_fit(amplitudes, probabilities, weights, guess):
+    """Weighted least-squares fit of P(1) = c0 - c1 * cos(pi * A / A_pi) to all points measured so far.
+
+    Fitting the Rabi curve instead of picking the highest point keeps narrow, shot-noise-limited
+    rounds from chasing noise. Returns (A_pi, c0, c1)."""
+    a, p, w = (np.asarray(x, dtype=float) for x in (amplitudes, probabilities, weights))
+    best = None
+    for a_pi in np.linspace(0.3 * guess, 2.0 * guess, 4001):
+        design = np.column_stack([np.ones_like(a), -np.cos(np.pi * a / a_pi)]) * w[:, None]
+        coef, *_ = np.linalg.lstsq(design, p * w, rcond=None)
+        residual = float(np.sum((design @ coef - p * w) ** 2))
+        if coef[1] > 0 and (best is None or residual < best[0]):
+            best = (residual, float(a_pi), float(coef[0]), float(coef[1]))
+    if best is None:
+        raise RuntimeError("No Rabi oscillation found; widen the first round or check the start amplitude.")
+    return best[1:]
 
 
 qc_x = QuantumCircuit(1, 1, name="x")
@@ -180,12 +203,16 @@ qc_xx.measure(0, 0)`,
     {
       cell_type: "markdown",
       source:
-        "## Rabi rounds\nEach round sweeps the amplitude around the best value so far, narrower and with more shots.",
+        "## Rabi rounds\nEach round sweeps the amplitude around the best value so far, narrower and with more shots. " +
+        "After each round, the Rabi curve P(1) = c0 − c1·cos(πA/A_π) is fitted to all points so far (weighted by shots); " +
+        "A_π is the calibrated amplitude. P(1) is IQM's readout-corrected excited-state probability, " +
+        "so values slightly below 0 or above 1 are within noise.",
     },
     {
       cell_type: "code",
       source: `ROUNDS = ${JSON.stringify(RABI_ROUNDS)}  # (span relative to start, points, shots)
 rounds, center = [], START_AMPLITUDE if 0 < START_AMPLITUDE < 1 else 0.3
+all_a, all_p, all_w = [], [], []
 for k, (span_factor, n_points, shots) in enumerate(ROUNDS, start=1):
     amplitudes = np.clip(np.linspace(center - span_factor * START_AMPLITUDE, center + span_factor * START_AMPLITUDE, n_points), 0.0, 1.0)
     s = make_settings([qc_x], shots=shots, amplitude=center)
@@ -193,14 +220,19 @@ for k, (span_factor, n_points, shots) in enumerate(ROUNDS, start=1):
     sweep = (Sweep(parameter=gate.amplitude_i.parameter, data=amplitudes), Sweep(parameter=gate.amplitude_q.parameter, data=Q_RATIO * amplitudes))
     print(f"Round {k}")
     probabilities = excited_probability(run(qc_x, s, sweeps=[sweep]))
-    center = peak_amplitude(amplitudes, probabilities)
-    print(f"  best amplitude {center:.5f}, max P(1) {probabilities.max():.3f}")
-    rounds.append((amplitudes, probabilities, center))
+    all_a += list(amplitudes)
+    all_p += list(probabilities)
+    all_w += [np.sqrt(shots)] * len(amplitudes)  # weight by 1/statistical error
+    center, c0, c1 = rabi_fit(all_a, all_p, all_w, center)
+    print(f"  fitted amplitude {center:.5f}, fitted P(1) at peak {c0 + c1:.3f}, max measured {probabilities.max():.3f}")
+    rounds.append((amplitudes, probabilities, center, c0, c1))
 AMPLITUDE = center
 
 fig, axes = plt.subplots(1, len(rounds), figsize=(4 * len(rounds), 3.2))
-for k, (ax, (a, p, best)) in enumerate(zip(np.atleast_1d(axes), rounds), start=1):
-    ax.plot(a, p, "o-")
+for k, (ax, (a, p, best, c0, c1)) in enumerate(zip(np.atleast_1d(axes), rounds), start=1):
+    grid = np.linspace(a.min(), a.max(), 200)
+    ax.plot(a, p, "o", label="measured")
+    ax.plot(grid, c0 - c1 * np.cos(np.pi * grid / best), "-", color="tab:gray", label="fit (all rounds so far)")
     ax.axvline(best, color="tab:red", linestyle="--", label=f"A = {best:.4f}")
     ax.set_title(f"Round {k}")
     ax.set_xlabel("amplitude_i")

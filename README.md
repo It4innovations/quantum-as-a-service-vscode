@@ -6,7 +6,7 @@ Run OpenQASM 3 and Qiskit circuits on the **VLQ** quantum computer from VS Code,
 
 ## Features and roadmap
 
-Status: ✅ available and tested · 🔶 available, not yet verified against live VLQ · 🗓️ planned
+Status: ✅ available and tested (live items verified on VLQ, 2026-11-11) · 🔶 available, not yet verified against live VLQ · ⚠️ available, blocked by a server-side issue · 🗓️ planned
 
 ### Python environment
 
@@ -22,10 +22,10 @@ Status: ✅ available and tested · 🔶 available, not yet verified against liv
 | Feature | Status | Notes |
 | --- | --- | --- |
 | LEXIS browser login, kept for the whole VS Code session | 🔶 | The login URL is also offered as a notification (works on remote hosts) |
-| LEXIS token in VS Code secret storage | 🔶 | `QaaS: Set LEXIS Token` / `Clear LEXIS Token and Log Out`. A refresh/offline token is renewed automatically; an access token is used as is |
-| Other LEXIS instances (test instance) via settings or a git-ignored dev connection file | 🔶 | See [Testing against the LEXIS test instance](#testing-against-the-lexis-test-instance). Status bar shows `LEXIS test`; jobs remember their instance |
-| `QaaS: Test LEXIS Connection` | 🔶 | Logs in, shows the user and token expiry, lists backends |
-| List backends and choose the default | 🔶 | Status bar shows the current backend |
+| LEXIS token in VS Code secret storage | ✅ | `QaaS: Set LEXIS Token` / `Clear LEXIS Token and Log Out`. A refresh/offline token is renewed automatically; an access token is used as is. Verified with both on production and the test instance |
+| Other LEXIS instances (test instance) via settings or a git-ignored dev connection file | ✅ | See [Testing against the LEXIS test instance](#testing-against-the-lexis-test-instance). Status bar shows `LEXIS test`; jobs remember their instance |
+| `QaaS: Test LEXIS Connection` | ✅ | Logs in, shows the user and token expiry, lists backends |
+| List backends and choose the default | ✅ | Status bar shows the current backend |
 | Topology view: qubit connectivity, calibration fidelities, chosen layout | 🗓️ | |
 | Remaining allocation in the status bar | 🗓️ | |
 
@@ -35,8 +35,8 @@ Status: ✅ available and tested · 🔶 available, not yet verified against liv
 | --- | --- | --- |
 | `.qasm` language: syntax highlighting, comments, brackets | ✅ | |
 | Errors shown in the editor (Qiskit OpenQASM 3 importer, on open and save) | ✅ | No login needed |
-| Transpile for VLQ: diff of original vs. transpiled QASM, depth / 2-qubit gates / layout | 🔶 | `Transpile` above the file or in the editor title |
-| Run on VLQ, with shots prompt and billed-time estimate before submitting | 🔶 | Several `.qasm` files selected in the explorer are sent as one job |
+| Transpile for VLQ: diff of original vs. transpiled QASM, depth / 2-qubit gates / layout | ✅ | `Transpile` above the file or in the editor title. Shows VLQ's native `r`, `cz` and `move` (via the resonator) |
+| Run on VLQ, with shots prompt and billed-time estimate before submitting | ✅ | Several `.qasm` files selected in the explorer are sent as one job |
 | `input` parameters with value prompts and sweeps | 🗓️ | |
 
 ### Python scripts and notebooks
@@ -44,7 +44,7 @@ Status: ✅ available and tested · 🔶 available, not yet verified against liv
 | Feature | Status | Notes |
 | --- | --- | --- |
 | Billed-time estimate above every `backend.run(...)` and `pulla.submit_playlist(...)` | ✅ | In `.py` files and `.ipynb` cells. Reads shots and circuit counts from literals and simple assignments, including earlier notebook cells |
-| Run Python file on VLQ, with LEXIS settings passed as environment variables | 🔶 | Asks for confirmation with the total estimate |
+| Run Python file on VLQ, with LEXIS settings passed as environment variables | ✅ | Asks for confirmation with the total estimate |
 | Track jobs submitted from scripts automatically | 🗓️ | For now: `Import Jobs from HEAppE` |
 | Results renderer for notebook outputs | 🗓️ | |
 
@@ -53,17 +53,17 @@ Status: ✅ available and tested · 🔶 available, not yet verified against liv
 | Feature | Status | Notes |
 | --- | --- | --- |
 | Jobs view with state, shots, estimate, calibration set and source file | ✅ | |
-| Jobs survive restarts; active jobs are refreshed in the background | 🔶 | Background refresh starts only when no login prompt can appear |
-| Import past jobs from HEAppE (`ListJobsForCurrentUser`) | 🔶 | |
-| Cancel, copy ID, remove from list | 🔶 | |
-| Notification when a job finishes; optional automatic download | 🔶 | |
+| Jobs survive restarts; active jobs are refreshed in the background | ✅ | Background refresh starts only when no login prompt can appear |
+| Import past jobs from HEAppE (`ListJobsForCurrentUser`) | ✅ | |
+| Cancel, copy ID, remove from list | ⚠️ | Copy ID and remove work. Cancel reaches HEAppE, but QScheduler currently rejects it (HTTP 502, cannot parse its task id); the extension reports the refusal |
+| Notification when a job finishes; optional automatic download | ✅ | |
 
 ### Results and analysis
 
 | Feature | Status | Notes |
 | --- | --- | --- |
-| Download results to a configurable path (`qaas.resultsDirectory`) or a folder you pick | 🔶 | Writes `counts.json`, `counts.csv`, `raw_artifacts.json`, `job.json`; `shots.csv` with per-shot measurements (`qaas.downloadMeasurements`) |
-| Download several selected jobs at once | 🔶 | |
+| Download results to a configurable path (`qaas.resultsDirectory`) or a folder you pick | ✅ | Writes `counts.json`, `counts.csv`, `raw_artifacts.json`, `job.json`; `shots.csv` with per-shot measurements (`qaas.downloadMeasurements`) |
+| Download several selected jobs at once | ✅ | |
 | Results view: histogram, shots, distinct outcomes, entropy, most frequent outcome, parity ⟨Z…Z⟩ | ✅ | One section per circuit |
 | Per-bit P(1) and ⟨Z⟩ | ✅ | |
 | Pairwise correlations (connected ⟨ZᵢZⱼ⟩ − ⟨Zᵢ⟩⟨Zⱼ⟩) as a heatmap | ✅ | Up to 16 bits; larger registers in Data Wrangler or the notebook |
@@ -92,13 +92,13 @@ Status: ✅ available and tested · 🔶 available, not yet verified against liv
 | Errors in operator files: YAML, schema, duplicate names, unknown waveforms, expressions, peak amplitude > 1 | ✅ | Deep checks run in Python on save, no login needed |
 | Waveform editor: live I/Q plot, values per qubit, checks against the hardware limits | ✅ | Peak amplitude, sample count, duration granularity, comparison with the native gate |
 | Calibration entries tied to the calibration set they were tuned on | ✅ | Older entries are marked; a calibration set change is reported |
-| Current calibration set and native `prx` values from the backend | 🔶 | `Refresh Current Calibration Set`; cached, re-read before pulse runs after `qaas.calibrationMaxAgeMinutes` |
+| Current calibration set and native `prx` values from the backend | ✅ | `Refresh Current Calibration Set`; cached, re-read before pulse runs after `qaas.calibrationMaxAgeMinutes` |
 | Migrate an operator to the current calibration set | ✅ | Rescale amplitudes by the native gate's change (default) or copy. Result is a draft until verified |
 | Start a draft from the native gate (duration, amplitude) | ✅ | For new operators or new calibration sets |
-| Run OpenQASM 3 at pulse level with operators | 🔶 | `// @qaas operator prx=<name>` in the file, or `Run with operator…`. Asks before using draft or older values |
-| Pulse jobs in the Jobs view, with operators and calibration set; result download | 🔶 | Same results view, CSV exports and notebook as circuit jobs |
+| Run OpenQASM 3 at pulse level with operators | ✅ | `// @qaas operator prx=<name>` in the file, or `Run with operator…`. Asks before using draft or older values |
+| Pulse jobs in the Jobs view, with operators and calibration set; result download | ✅ | Same results view, CSV exports and notebook as circuit jobs. Also after a restart: the job is recompiled from its stored sources and operators to map results to bits |
 | Insert Python code for an operator (classes, calibration, `register_qaas_operators` / `apply_qaas_operators`) | ✅ | For scripts and notebooks using `QPulla` |
-| Rabi amplitude calibration notebook that writes the result back | 🔶 | Generated per operator and qubit; 7 jobs, estimate shown before creating. The result file is offered for saving into the operator |
+| Rabi amplitude calibration notebook that writes the result back | ✅ | Generated per operator and qubit; 7 jobs, estimate shown before creating. Fits the Rabi curve to all rounds (weighted by shots). Uses `LEXIS_TOKEN` when set, otherwise the browser login. The result file is offered for saving into the operator |
 | `defcal` in OpenQASM 3 | 🗓️ | Qiskit's OpenQASM 3 importer does not support `defcal` yet; the comment directive is used instead |
 | Pulse schedule timeline after compilation | 🗓️ | |
 | Ramsey and T1 calibration recipes | 🗓️ | |

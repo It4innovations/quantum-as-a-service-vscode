@@ -36,7 +36,8 @@
     "IQM",
     "VLQ",
     "LEXIS",
-    "HEAppE"
+    "HEAppE",
+    "QHEAppE"
   ],
   "activationEvents": [
     "onStartupFinished"
