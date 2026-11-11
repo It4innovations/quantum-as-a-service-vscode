@@ -390,9 +390,11 @@ export class QasmCommands {
         calibrationSetId: res.calibrationSetId,
         source: docs.map((d) => vscode.workspace.asRelativePath(d.uri)).join(", "),
         estimate: { low: est.low, high: est.high },
-        qasmSources: sources.join("").length <= MAX_STORED_SOURCE ? sources : undefined,
+        // pulse jobs always keep their sources: downloading recompiles them to map results to bits
+        qasmSources: pulse || sources.join("").length <= MAX_STORED_SOURCE ? sources : undefined,
         kind: pulse ? "pulse" : "circuit",
         operators: pulse?.used,
+        pulsePayload: pulse ? { operators: pulse.operators, use: pulse.use } : undefined,
         origin: "extension",
       });
       vscode.window.showInformationMessage(`QaaS: submitted job #${res.jobId} (est. ${formatRange(est)} billed).`);

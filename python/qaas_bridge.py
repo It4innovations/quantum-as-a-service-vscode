@@ -13,6 +13,7 @@ stderr (shown in the "QaaS" output channel) and nothing can read the protocol st
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import csv
 import json
@@ -53,6 +54,18 @@ def _is_outdated(version: str | None) -> bool:
     release += (0,) * (3 - len(release))
     pre = bool(re.match(r"\.?(a|b|rc|dev)", match.group(2)))
     return release < MIN_QAAS or (release == MIN_QAAS and pre)
+
+
+def _dumps_qasm3(circuit) -> str:
+    """OpenQASM 3 text of a transpiled circuit. Native gates without a Qiskit definition
+    (IQM's ``move`` on VLQ's resonator) are declared as basis gates instead of failing."""
+    from qiskit import qasm3
+
+    builtin = {"measure", "barrier", "reset", "delay"}
+    opaque = sorted(
+        {i.operation.name for i in circuit.data if i.operation.definition is None and i.operation.name not in builtin}
+    )
+    return qasm3.dumps(circuit, basis_gates=("U", *opaque)) if opaque else qasm3.dumps(circuit)
 
 
 def _jsonable(value: Any) -> Any:
@@ -143,6 +156,7 @@ class Server:
         self._providers: dict[tuple, Any] = {}
         self._backends: dict[tuple, Any] = {}
         self._pullas: dict[tuple, Any] = {}
+        self._pulse_runs: dict[str, tuple[Any, Any]] = {}
 
     # --- connection -------------------------------------------------------
 
@@ -316,7 +330,7 @@ class Server:
             backend = self._backend(p)
             tqc = backend.transpile(qc)
             out["transpiled"] = _circuit_stats(tqc)
-            out["transpiledQasm"] = qasm3.dumps(tqc)
+            out["transpiledQasm"] = _dumps_qasm3(tqc)
             layout = getattr(tqc, "layout", None)
             if layout is not None:
                 with contextlib.suppress(Exception):
@@ -365,19 +379,34 @@ class Server:
         out = []
         for job in jobs or []:
             d = _jsonable(job)
+            # py4heappe models serialize to snake_case; raw HEAppE JSON uses PascalCase
+            get = lambda snake, pascal, d=d: d.get(snake, d.get(pascal))  # noqa: E731
             out.append(
                 {
-                    "jobId": str(d.get("Id")),
-                    "name": d.get("Name"),
-                    "state": HEAppEJobState.readable(d.get("State", -1)),
-                    "createdAt": d.get("CreationTime") or d.get("SubmitTime"),
-                    "tasks": len(d.get("Tasks") or []),
+                    "jobId": str(get("id", "Id")),
+                    "name": get("name", "Name"),
+                    "state": HEAppEJobState.readable(
+                        get("state", "State") if get("state", "State") is not None else -1
+                    ),
+                    "createdAt": get("creation_time", "CreationTime") or get("submit_time", "SubmitTime"),
+                    "tasks": len(get("tasks", "Tasks") or []),
                 }
             )
         return out
 
     def cancel(self, p: dict) -> bool:
-        self._job(p).cancel()
+        # QJob.cancel() in qaas 1.0.0 calls the coroutine QClient.cancel_job without awaiting it,
+        # so the request is never sent. Run it on the client's loop instead.
+        import inspect
+
+        qclient = self._backend(p)._qclient
+        result = qclient.cancel_job(int(p["jobId"]))
+        if inspect.iscoroutine(result):
+            result = qclient._run(result)
+        if result is False:
+            raise BridgeError(
+                f"HEAppE did not accept cancelling job {p['jobId']}; the reason is in the QaaS output channel."
+            )
         return True
 
     def download(self, p: dict) -> dict:
@@ -509,17 +538,19 @@ class Server:
             "fetchedAt": datetime.now(UTC).isoformat(),
         }
 
-    def submitPulse(self, p: dict) -> dict:
-        """Compile OpenQASM 3 circuits with catalog operators and submit them as a pulse-level job."""
+    def _compile_pulse(self, p: dict):
+        """Compile OpenQASM 3 circuits with catalog operators. Returns (pulla, run_definition, context, n)."""
         import qaas_pulse
         from qiskit import qasm3
 
         circuits_q = []
-        for index, src in enumerate(p["sources"]):
+        for index, src in enumerate(p.get("sources") or []):
             try:
                 circuits_q.append(qasm3.loads(src))
             except Exception as exc:
                 raise BridgeError(f"Circuit {index}: OpenQASM 3 parse error: {exc}") from exc
+        if not circuits_q:
+            raise BridgeError("No OpenQASM 3 sources for this pulse job.")
         operators, use = p.get("operators") or [], p.get("use") or {}
         pulla = self._pulla(p)
         circuits, compiler = pulla.qiskit_to_iqm(pulla.backend.transpile(circuits_q))
@@ -530,30 +561,56 @@ class Server:
         _check_loci(circuits, operators, use)
         settings = compiler.get_settings(circuits=circuits)
         qaas_pulse.apply_settings(settings, operators, use)
-        shots = int(p["shots"])
-        settings.set_shots(shots)
+        settings.set_shots(int(p["shots"]))
         run_definition, context = compiler.compile(circuits, settings=settings)
+        return pulla, run_definition, context, len(circuits)
+
+    def submitPulse(self, p: dict) -> dict:
+        """Compile OpenQASM 3 circuits with catalog operators and submit them as a pulse-level job."""
+        pulla, run_definition, context, n = self._compile_pulse(p)
         job = pulla.submit_playlist(run_definition, context=context)
+        job_id = str(job.job_id.int)
+        # The compile context maps readout results to classical bits; HEAppE does not keep it.
+        self._pulse_runs[job_id] = (run_definition, context)
         return {
-            "jobId": str(job.job_id.int),
-            "shots": shots,
-            "circuits": len(circuits),
+            "jobId": job_id,
+            "shots": int(p["shots"]),
+            "circuits": n,
             "calibrationSetId": str(pulla.backend.architecture.calibration_set_id),
             "submittedAt": datetime.now(UTC).isoformat(),
         }
 
     def downloadPulse(self, p: dict) -> dict:
-        """Results of a finished pulse-level job, as counts (same files as circuit jobs)."""
+        """Results of a finished pulse-level job, as counts (same files as circuit jobs).
+
+        Converting raw sweep results to counts needs the compile context. It is kept for jobs
+        submitted by this bridge process; otherwise the job is recompiled from the stored
+        sources and operators (p['sources'], p['operators'], p['use'])."""
         from uuid import UUID
+
+        from iqm.station_control.client.job_trackers import RunJobTracker
 
         state = self.jobInfo(p)["state"]
         if state != "FINISHED":
             raise BridgeError(f"Job {p['jobId']} is {state}; results are available once it is FINISHED.")
-        pulla = self._pulla(p)
-        tracker = pulla.get_job(UUID(int=int(p["jobId"])))
         shots = int(p.get("shots") or 0)
         if not shots:
             raise BridgeError("The number of shots of this pulse job is unknown.")
+        job_id = str(p["jobId"])
+        run = self._pulse_runs.get(job_id)
+        pulla = self._pulla(p)
+        if run is None:
+            if not p.get("sources"):
+                raise BridgeError(
+                    f"Pulse job {job_id} was submitted elsewhere; its circuits and operators are unknown, "
+                    "so the raw results cannot be mapped to classical bits."
+                )
+            pulla, run_definition, context, _ = self._compile_pulse({**p, "shots": shots})
+            run = (run_definition, context)
+            self._pulse_runs[job_id] = run
+        uuid = UUID(int=int(job_id))
+        executor = pulla.executor
+        tracker = RunJobTracker(job_data=executor.get_job(uuid), _executor=executor, _context=run[1], _payload=run[0])
         result = pulla.sweep_job_to_qiskit(tracker, shots=shots)
         counts = result.get_counts()
         counts = counts if isinstance(counts, list) else [counts]
@@ -609,6 +666,35 @@ def _write_results(p: dict, counts: list, result, raw, with_meas: bool) -> dict:
     return {"directory": str(directory), "files": written, "counts": counts}
 
 
+def _close_heappe_clients() -> None:
+    """Close py4heappe ApiClient thread pools while the interpreter is still intact.
+
+    ApiClient.__del__ closes its ThreadPool; run during interpreter shutdown it fails with
+    "'NoneType' object has no attribute ..." tracebacks. Closing them first, and making
+    __del__ tolerant, keeps the output channel clean."""
+    import gc
+
+    for name, module in list(sys.modules.items()):
+        if not (name.startswith("py4heappe.") and name.endswith(".api_client")):
+            continue
+        cls = getattr(module, "ApiClient", None)
+        if cls is None or getattr(cls, "_qaas_quiet", False):
+            continue
+        original = cls.__del__
+
+        def quiet_del(self, _original=original):
+            with contextlib.suppress(Exception):
+                _original(self)
+
+        cls.__del__ = quiet_del
+        cls._qaas_quiet = True
+        for obj in gc.get_objects():
+            if isinstance(obj, cls):
+                with contextlib.suppress(Exception):
+                    obj.pool.close()
+                    obj.pool.join()
+
+
 def serve() -> int:
     proto_in = os.fdopen(os.dup(0), "r", encoding="utf-8")
     proto_out = os.fdopen(os.dup(1), "w", encoding="utf-8", buffering=1)
@@ -636,6 +722,7 @@ def serve() -> int:
             traceback.print_exc(file=sys.stderr)
             response = {"id": req_id, "error": {"type": type(exc).__name__, "message": str(exc)}}
         proto_out.write(json.dumps(response, default=str) + "\n")
+    _close_heappe_clients()
     return 0
 
 
@@ -643,4 +730,5 @@ if __name__ == "__main__":
     if sys.argv[1:] != ["serve"]:
         sys.stderr.write("usage: qaas_bridge.py serve\n")
         sys.exit(2)
+    atexit.register(_close_heappe_clients)
     sys.exit(serve())

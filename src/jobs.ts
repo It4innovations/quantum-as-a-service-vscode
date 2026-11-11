@@ -33,6 +33,8 @@ export interface JobRecord {
   /** circuit: gate-level job; pulse: compiled with catalog operators through QPulla. */
   kind?: "circuit" | "pulse";
   operators?: { name: string; gate: string; calibrationSetId: string; status: string }[];
+  /** Operator specs, values and gate mapping of a pulse job; needed to map its raw results to bits. */
+  pulsePayload?: { operators: { spec: object; loci: object }[]; use: Record<string, string> };
   origin: "extension" | "imported";
   /** LEXIS instance the job was submitted to; undefined for production. */
   instance?: LexisInstance;
@@ -296,7 +298,13 @@ export class JobManager implements vscode.Disposable {
           this.bridge.call<DownloadResult>(
             r.kind === "pulse" ? "downloadPulse" : "download",
             await this.targetFor(r),
-            { jobId: r.jobId, shots: r.shots, directory, withMeasurements: cfg().get<boolean>("downloadMeasurements") },
+            {
+              jobId: r.jobId,
+              shots: r.shots,
+              directory,
+              withMeasurements: cfg().get<boolean>("downloadMeasurements"),
+              ...(r.kind === "pulse" ? { sources: r.qasmSources, ...r.pulsePayload } : {}),
+            },
             token,
           ),
       );
@@ -371,7 +379,9 @@ export class JobManager implements vscode.Disposable {
     }
     try {
       await this.bridge.call("cancel", await this.targetFor(r), { jobId: r.jobId, shots: r.shots });
-      await this.store.update(r, { state: "CANCELED" });
+      // HEAppE accepted the request; the job may still finish first, so read the real state.
+      vscode.window.showInformationMessage(`QaaS: cancellation of #${r.jobId} requested.`);
+      await this.poll(true);
     } catch (e) {
       vscode.window.showErrorMessage(`QaaS: cancel failed: ${(e as Error).message}`);
     }
