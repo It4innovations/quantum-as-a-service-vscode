@@ -44,6 +44,10 @@
           "name": "Jobs"
         },
         {
+          "id": "qaas.operators",
+          "name": "Pulse Operators"
+        },
+        {
           "id": "qaas.estimator",
           "name": "Billing Estimator",
           "type": "webview"
@@ -54,6 +58,10 @@
       {
         "view": "qaas.jobs",
         "contents": "No jobs yet.\n[New OpenQASM 3 Circuit](command:qaas.newQasmFile)\n[Import Jobs from HEAppE](command:qaas.jobs.import)\nSubmitted jobs are kept across restarts."
+      },
+      {
+        "view": "qaas.operators",
+        "contents": "No pulse-level operators yet.\n[New Operator](command:qaas.operators.new)\nAn operator is a custom prx pulse (waveform + calibration per qubit and calibration set), stored in .qaas/operators/*.yaml next to your code."
       }
     ],
     "languages": [
@@ -219,6 +227,70 @@
         "title": "Open Analysis Notebook",
         "category": "QaaS",
         "icon": "$(notebook)"
+      },
+      {
+        "command": "qaas.runQasmWithOperator",
+        "title": "Run on VLQ with Pulse Operator…",
+        "category": "QaaS",
+        "icon": "$(pulse)"
+      },
+      {
+        "command": "qaas.operators.new",
+        "title": "New Pulse Operator",
+        "category": "QaaS",
+        "icon": "$(add)"
+      },
+      {
+        "command": "qaas.operators.refreshCalibration",
+        "title": "Refresh Current Calibration Set",
+        "category": "QaaS",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "qaas.operators.openEditor",
+        "title": "Open Waveform Editor",
+        "category": "QaaS",
+        "icon": "$(graph-line)"
+      },
+      {
+        "command": "qaas.operators.openFile",
+        "title": "Open Operator File",
+        "category": "QaaS",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "qaas.operators.seed",
+        "title": "Start Calibration from Native Gate",
+        "category": "QaaS"
+      },
+      {
+        "command": "qaas.operators.migrate",
+        "title": "Migrate to Current Calibration Set",
+        "category": "QaaS",
+        "icon": "$(arrow-swap)"
+      },
+      {
+        "command": "qaas.operators.markCalibrated",
+        "title": "Mark as Calibrated",
+        "category": "QaaS",
+        "icon": "$(verified)"
+      },
+      {
+        "command": "qaas.operators.deleteEntry",
+        "title": "Delete Calibration Entry",
+        "category": "QaaS"
+      },
+      {
+        "command": "qaas.operators.insertCode",
+        "title": "Insert Python Code for Operator",
+        "category": "QaaS",
+        "icon": "$(code)"
+      },
+      {
+        "command": "qaas.operators.calibrate",
+        "title": "Calibrate with Rabi Notebook…",
+        "category": "QaaS",
+        "icon": "$(beaker)"
       }
     ],
     "menus": {
@@ -258,6 +330,42 @@
         {
           "command": "qaas.jobs.openNotebook",
           "when": "false"
+        },
+        {
+          "command": "qaas.operators.openEditor",
+          "when": "false"
+        },
+        {
+          "command": "qaas.operators.openFile",
+          "when": "false"
+        },
+        {
+          "command": "qaas.operators.seed",
+          "when": "false"
+        },
+        {
+          "command": "qaas.operators.migrate",
+          "when": "false"
+        },
+        {
+          "command": "qaas.operators.markCalibrated",
+          "when": "false"
+        },
+        {
+          "command": "qaas.operators.deleteEntry",
+          "when": "false"
+        },
+        {
+          "command": "qaas.operators.insertCode",
+          "when": "false"
+        },
+        {
+          "command": "qaas.operators.calibrate",
+          "when": "false"
+        },
+        {
+          "command": "qaas.runQasmWithOperator",
+          "when": "resourceLangId == openqasm || resourceExtname == .qasm"
         }
       ],
       "editor/title/run": [
@@ -267,6 +375,10 @@
         },
         {
           "command": "qaas.runQasm",
+          "when": "resourceLangId == openqasm || resourceExtname == .qasm"
+        },
+        {
+          "command": "qaas.runQasmWithOperator",
           "when": "resourceLangId == openqasm || resourceExtname == .qasm"
         }
       ],
@@ -299,6 +411,16 @@
           "command": "qaas.jobs.clearFinished",
           "when": "view == qaas.jobs",
           "group": "navigation@3"
+        },
+        {
+          "command": "qaas.operators.new",
+          "when": "view == qaas.operators",
+          "group": "navigation@1"
+        },
+        {
+          "command": "qaas.operators.refreshCalibration",
+          "when": "view == qaas.operators",
+          "group": "navigation@2"
         }
       ],
       "view/item/context": [
@@ -361,6 +483,76 @@
           "command": "qaas.jobs.openNotebook",
           "when": "view == qaas.jobs && viewItem =~ /\\bdownloaded\\b/",
           "group": "1_results@6"
+        },
+        {
+          "command": "qaas.operators.openEditor",
+          "when": "view == qaas.operators && viewItem =~ /^operator\\./",
+          "group": "inline@1"
+        },
+        {
+          "command": "qaas.operators.migrate",
+          "when": "view == qaas.operators && viewItem == operator.stale",
+          "group": "inline@2"
+        },
+        {
+          "command": "qaas.operators.openEditor",
+          "when": "view == qaas.operators && viewItem =~ /^operator\\./",
+          "group": "1_edit@1"
+        },
+        {
+          "command": "qaas.operators.openFile",
+          "when": "view == qaas.operators && viewItem =~ /^operator\\./",
+          "group": "1_edit@2"
+        },
+        {
+          "command": "qaas.operators.insertCode",
+          "when": "view == qaas.operators && viewItem =~ /^operator\\./",
+          "group": "2_use@1"
+        },
+        {
+          "command": "qaas.operators.calibrate",
+          "when": "view == qaas.operators && viewItem =~ /^operator\\./",
+          "group": "2_use@2"
+        },
+        {
+          "command": "qaas.operators.migrate",
+          "when": "view == qaas.operators && viewItem == operator.stale",
+          "group": "3_calibration@1"
+        },
+        {
+          "command": "qaas.operators.seed",
+          "when": "view == qaas.operators && viewItem =~ /^operator\\.(uncalibrated|stale|unknown)$/",
+          "group": "3_calibration@2"
+        },
+        {
+          "command": "qaas.operators.migrate",
+          "when": "view == qaas.operators && viewItem =~ /^calibration\\.stale\\./",
+          "group": "inline@1"
+        },
+        {
+          "command": "qaas.operators.markCalibrated",
+          "when": "view == qaas.operators && viewItem =~ /^calibration\\.(current|draft|unknown)\\.draft$/",
+          "group": "inline@2"
+        },
+        {
+          "command": "qaas.operators.migrate",
+          "when": "view == qaas.operators && viewItem =~ /^calibration\\.stale\\./",
+          "group": "1_calibration@1"
+        },
+        {
+          "command": "qaas.operators.markCalibrated",
+          "when": "view == qaas.operators && viewItem =~ /\\.draft$/",
+          "group": "1_calibration@2"
+        },
+        {
+          "command": "qaas.operators.insertCode",
+          "when": "view == qaas.operators && viewItem =~ /^calibration\\./",
+          "group": "2_use@1"
+        },
+        {
+          "command": "qaas.operators.deleteEntry",
+          "when": "view == qaas.operators && viewItem =~ /^calibration\\./",
+          "group": "9_delete@1"
         }
       ]
     },
@@ -450,6 +642,17 @@
           "default": 50,
           "minimum": 1,
           "description": "Maximum number of jobs fetched by Import Jobs from HEAppE."
+        },
+        "qaas.pulseSampleRate": {
+          "type": "number",
+          "default": 2000000000.0,
+          "description": "Drive sample rate (samples/s) for waveform previews until the calibration set has been fetched."
+        },
+        "qaas.calibrationMaxAgeMinutes": {
+          "type": "integer",
+          "default": 60,
+          "minimum": 1,
+          "description": "Pulse-level runs re-read the current calibration set when the cached one is older than this."
         }
       }
     },
@@ -461,6 +664,22 @@
             "type": "string"
           }
         }
+      }
+    ],
+    "yamlValidation": [
+      {
+        "fileMatch": "**/.qaas/operators/*.yaml",
+        "url": "./schemas/qaas-operator.schema.json"
+      },
+      {
+        "fileMatch": "**/.qaas/operators/*.yml",
+        "url": "./schemas/qaas-operator.schema.json"
+      }
+    ],
+    "jsonValidation": [
+      {
+        "fileMatch": "**/.qaas/operators/*.json",
+        "url": "./schemas/qaas-operator.schema.json"
       }
     ]
   },
@@ -474,7 +693,8 @@
     "test:unit": "npm run compile && node --test out/test/unit/*.test.js",
     "pretest": "npm run compile",
     "test": "vscode-test",
-    "package": "vsce package"
+    "package": "vsce package",
+    "test:py": "python -m unittest discover -s python/tests"
   },
   "devDependencies": {
     "@biomejs/biome": "2.2.4",
@@ -485,5 +705,8 @@
     "@vscode/test-electron": "^3.1.0",
     "@vscode/vsce": "^3.2.2",
     "typescript": "^5.7.2"
+  },
+  "dependencies": {
+    "yaml": "2.8.1"
   }
 }

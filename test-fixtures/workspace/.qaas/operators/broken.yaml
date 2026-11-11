@@ -1,0 +1,4 @@
+schema: qaas-operator/v1
+name: Broken-Name
+waveform:
+  i: { type: builtin, name: NotAWaveform }

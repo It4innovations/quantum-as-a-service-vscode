@@ -6,5 +6,6 @@ import { defineConfig } from "@vscode/test-cli";
 // User data lives in the temp dir: macOS limits socket paths to ~104 characters.
 export default defineConfig({
   files: "out/test/*.test.js",
+  workspaceFolder: "test-fixtures/workspace",
   launchArgs: ["--user-data-dir", path.join(os.tmpdir(), "qaas-vscode-test"), "--disable-extensions"],
 });

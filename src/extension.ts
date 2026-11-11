@@ -7,8 +7,10 @@ import { createEnvironment, installQaas, selectInterpreter } from "./environment
 import { detectCalls, EstimateCodeLensProvider, PYTHON_SELECTOR, QASM_SELECTOR } from "./estimateLens";
 import { type EstimatorPreset, EstimatorViewProvider } from "./estimatorView";
 import { JobManager, type JobRecord, JobStore, JobsTreeProvider, TERMINAL } from "./jobs";
+import { OperatorCatalog, OperatorCommands, type OperatorNode, OperatorsTreeProvider } from "./operators";
 import { resolvePython } from "./python";
 import { QasmCommands, TRANSPILED_SCHEME, TranspiledContentProvider } from "./qasm";
+import { WaveformEditor } from "./waveformEditor";
 
 interface CheckData {
   python: string;
@@ -193,7 +195,14 @@ export function activate(context: vscode.ExtensionContext): void {
   const lens = new EstimateCodeLensProvider();
   const estimator = new EstimatorViewProvider();
   const transpiled = new TranspiledContentProvider();
-  const qasm = new QasmCommands(bridge, jobs, context.secrets, transpiled, output);
+  const catalog = new OperatorCatalog(bridge, context.secrets, context.globalState, output);
+  const operatorCommands = new OperatorCommands(catalog, bridge, context.secrets, output);
+  const qasm = new QasmCommands(bridge, jobs, context.secrets, transpiled, output, catalog);
+  const operatorsView = vscode.window.createTreeView("qaas.operators", {
+    treeDataProvider: new OperatorsTreeProvider(catalog),
+  });
+  void catalog.loadCachedInfo();
+  catalog.onDidChange(() => lens.refresh());
 
   const jobsView = vscode.window.createTreeView("qaas.jobs", {
     treeDataProvider: tree,
@@ -235,6 +244,9 @@ export function activate(context: vscode.ExtensionContext): void {
       if (e.affectsConfiguration("qaas.pythonPath")) {
         bridge.restart();
       }
+      if (["qaas.lexisProject", "qaas.lexisResource", "qaas.backendName"].some((k) => e.affectsConfiguration(k))) {
+        void catalog.loadCachedInfo();
+      }
       if (e.affectsConfiguration("qaas.jobPollSeconds")) {
         jobs.schedule();
       }
@@ -275,6 +287,37 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("qaas.runCurrentFile", (uri?: vscode.Uri) => runPythonFile(context, uri)),
     vscode.commands.registerCommand("qaas.runQasm", (uri?: vscode.Uri, uris?: vscode.Uri[]) => qasm.run(uri, uris)),
     vscode.commands.registerCommand("qaas.transpileQasm", (uri?: vscode.Uri) => qasm.transpile(uri)),
+    vscode.commands.registerCommand("qaas.runQasmWithOperator", (uri?: vscode.Uri) => qasm.runWithOperator(uri)),
+
+    // pulse-level operator catalog
+    catalog,
+    operatorsView,
+    operatorCommands.watchResults(),
+    vscode.commands.registerCommand("qaas.operators.new", () => operatorCommands.newOperator()),
+    vscode.commands.registerCommand("qaas.operators.refreshCalibration", () => operatorCommands.refreshCalibration()),
+    vscode.commands.registerCommand(
+      "qaas.operators.openEditor",
+      (node?: OperatorNode, calibrationSetId?: string, locus?: string) => {
+        const n = node ?? operatorsView.selection[0];
+        if (n && (n.kind === "operator" || n.kind === "calibration" || n.kind === "locus")) {
+          const set = calibrationSetId ?? (n.kind !== "operator" ? n.cal.calibrationSetId : undefined);
+          WaveformEditor.open(catalog, bridge, n.entry, set, locus ?? (n.kind === "locus" ? n.locus : undefined));
+        }
+      },
+    ),
+    vscode.commands.registerCommand("qaas.operators.openFile", (n: OperatorNode) => {
+      if (n.kind !== "calset") {
+        void vscode.window.showTextDocument(n.entry.uri);
+      }
+    }),
+    vscode.commands.registerCommand("qaas.operators.seed", (n: OperatorNode) => operatorCommands.seed(n)),
+    vscode.commands.registerCommand("qaas.operators.migrate", (n: OperatorNode) => operatorCommands.migrate(n)),
+    vscode.commands.registerCommand("qaas.operators.markCalibrated", (n: OperatorNode) =>
+      operatorCommands.markCalibrated(n),
+    ),
+    vscode.commands.registerCommand("qaas.operators.deleteEntry", (n: OperatorNode) => operatorCommands.deleteEntry(n)),
+    vscode.commands.registerCommand("qaas.operators.insertCode", (n: OperatorNode) => operatorCommands.insertCode(n)),
+    vscode.commands.registerCommand("qaas.operators.calibrate", (n: OperatorNode) => operatorCommands.calibrate(n)),
     vscode.commands.registerCommand("qaas.openEstimator", (preset?: EstimatorPreset) => estimator.open(preset)),
 
     // jobs

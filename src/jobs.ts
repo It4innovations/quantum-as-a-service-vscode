@@ -29,6 +29,9 @@ export interface JobRecord {
   downloadedTo?: string;
   /** OpenQASM sources as submitted (kept when small), for ideal simulation and re-runs. */
   qasmSources?: string[];
+  /** circuit: gate-level job; pulse: compiled with catalog operators through QPulla. */
+  kind?: "circuit" | "pulse";
+  operators?: { name: string; gate: string; calibrationSetId: string; status: string }[];
   origin: "extension" | "imported";
 }
 
@@ -104,7 +107,7 @@ export class JobsTreeProvider implements vscode.TreeDataProvider<JobRecord> {
   getTreeItem(r: JobRecord): vscode.TreeItem {
     const item = new vscode.TreeItem(r.name || `Job ${r.jobId}`);
     item.id = key(r);
-    item.description = `${r.state.toLowerCase()} · #${r.jobId} · ${r.backend || "?"}`;
+    item.description = `${r.state.toLowerCase()} · #${r.jobId} · ${r.backend || "?"}${r.kind === "pulse" ? " · pulse" : ""}`;
     item.iconPath = stateIcon(r.state);
     const done = TERMINAL.has(r.state);
     item.contextValue = [
@@ -129,6 +132,7 @@ export class JobsTreeProvider implements vscode.TreeDataProvider<JobRecord> {
         r.estimate ? `${formatSeconds(r.estimate.low)} – ${formatSeconds(r.estimate.high)}` : undefined,
       ],
       ["Calibration set", r.calibrationSetId],
+      ["Pulse operators", r.operators?.map((o) => `${o.gate}=${o.name} (${o.status})`).join(", ")],
       ["Submitted", new Date(r.submittedAt).toLocaleString()],
       ["Source", r.source],
       ["Results", r.downloadedTo],
@@ -273,7 +277,7 @@ export class JobManager implements vscode.Disposable {
         },
         async (_p, token) =>
           this.bridge.call<DownloadResult>(
-            "download",
+            r.kind === "pulse" ? "downloadPulse" : "download",
             await this.targetFor(r),
             { jobId: r.jobId, shots: r.shots, directory, withMeasurements: cfg().get<boolean>("downloadMeasurements") },
             token,

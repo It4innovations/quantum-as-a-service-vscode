@@ -1,0 +1,14 @@
+schema: qaas-operator/v1
+name: hann_drag
+gate: prx
+description: Hann pulse with a DRAG Q channel (test fixture)
+waveform:
+  i: { type: expression, expression: "cos(pi * t) ** 2" }
+  q: { type: derivative }
+calibrations:
+  - calibrationSetId: 00000000-0000-0000-0000-000000000001
+    backend: VLQ
+    status: calibrated
+    verifiedLoci: [QB1]
+    loci:
+      QB1: { duration: 4.0e-8, amplitude_i: 0.42, amplitude_q: 0.02 }
