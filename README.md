@@ -15,12 +15,14 @@ Status: ✅ available and tested (live items verified on VLQ, 2026-11-11) · �
 | Find interpreters: workspace venvs, conda / miniconda / miniforge envs, pyenv versions, Python extension environments, system Python | ✅ | `QaaS: Select Python Interpreter` shows each one's Python version and installed qaas |
 | Create a Python 3.12 venv (from any 3.12 interpreter, e.g. pyenv) or a conda env, then install qaas | ✅ | `QaaS: Create Python Environment for qaas` |
 | Install / upgrade `qaas[<extra>]>=1.0.0,<2` from PyPI | ✅ | Runs `python -m pip` as a VS Code task. Checks for Python 3.12 and warns outside a venv/conda env |
-| Environment check (qaas, qiskit, iqm-client, iqm-pulla, py4lexis versions) | ✅ | Flags qaas older than 1.0.0 |
+| Environment check (qaas, qiskit, iqm-client, iqm-pulla, py4lexis versions) | ✅ | Flags qaas older than 1.0.0. Runs before LEXIS commands: an unsuitable interpreter (e.g. macOS's Python 3.9) gets Select Interpreter / Create Environment / Install qaas instead of a crash |
 
 ### Login and backends
 
 | Feature | Status | Notes |
 | --- | --- | --- |
+| **Synchronize with LEXIS Platform**: sign in, check the backend, import jobs from HEAppE, refresh active jobs and the calibration set | 🔶 | Jobs view title bar and welcome screen. Each step is verified on VLQ; the combined flow is new |
+| Sign-in prompt before any LEXIS command when not signed in: browser login, paste a refresh/access token, or a dev connection file | 🔶 | `QaaS: Sign in to LEXIS…` switches account or method |
 | LEXIS browser login, kept for the whole VS Code session | 🔶 | The login URL is also offered as a notification (works on remote hosts) |
 | LEXIS token in VS Code secret storage | ✅ | `QaaS: Set LEXIS Token` / `Clear LEXIS Token and Log Out`. A refresh/offline token is renewed automatically; an access token is used as is. Verified with both on production and the test instance |
 | Other LEXIS instances (test instance) via settings or a git-ignored dev connection file | ✅ | See [Testing against the LEXIS test instance](#testing-against-the-lexis-test-instance). Status bar shows `LEXIS test`; jobs remember their instance |

@@ -19,7 +19,20 @@ interface Pending {
 }
 
 /** Methods that need a LEXIS login. */
-const AUTH_METHODS = new Set(["backends", "backendInfo", "submit", "jobInfo", "listJobs", "cancel", "download"]);
+const AUTH_METHODS = new Set([
+  "whoami",
+  "backends",
+  "backendInfo",
+  "analyze",
+  "submit",
+  "jobInfo",
+  "listJobs",
+  "cancel",
+  "download",
+  "pulseInfo",
+  "submitPulse",
+  "downloadPulse",
+]);
 
 /**
  * Long-running `python qaas_bridge.py serve` process. Keeps the LEXIS login and HEAppE
@@ -34,6 +47,8 @@ export class Bridge implements vscode.Disposable {
   private stderrBuf = "";
   /** True once a login-requiring call succeeded in this process. */
   authenticated = false;
+  /** True once the environment check passed for this process (Python 3.12 with qaas). */
+  environmentOk = false;
 
   constructor(
     private readonly extensionPath: string,
@@ -69,6 +84,7 @@ export class Bridge implements vscode.Disposable {
     this.proc = undefined;
     this.starting = undefined;
     this.authenticated = false;
+    this.environmentOk = false;
     this.failAll(new BridgeError("Python bridge restarted", "Restarted"));
   }
 
@@ -129,6 +145,7 @@ export class Bridge implements vscode.Disposable {
       if (this.proc === proc) {
         this.proc = undefined;
         this.authenticated = false;
+        this.environmentOk = false;
       }
       if (this.pending.size > 0) {
         const tail = this.stderrBuf.trim().split("\n").slice(-3).join(" ");

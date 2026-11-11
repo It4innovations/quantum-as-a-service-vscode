@@ -88,5 +88,33 @@ class PulseDownloadTests(unittest.TestCase):
         self.assertIn("submitted elsewhere", str(ctx.exception))
 
 
+class EnvironmentTests(unittest.TestCase):
+    def test_old_python_is_reported_not_crashed(self):
+        with mock.patch.object(qaas_bridge, "MIN_PYTHON", (99, 0)):
+            problem = qaas_bridge._environment_problem()
+        self.assertIsInstance(problem, qaas_bridge.EnvironmentProblem)
+        self.assertEqual(problem.kind, "Environment")
+        self.assertIn("99.0", str(problem))
+
+    def test_current_python_is_fine(self):
+        self.assertIsNone(qaas_bridge._environment_problem())
+
+    def test_check_reports_python_ok(self):
+        self.assertTrue(qaas_bridge.Server().check({})["pythonOk"])
+
+
+class OldPythonStartupTests(unittest.TestCase):
+    """The bridge must import on old Pythons (e.g. macOS's 3.9) so it can report them instead of crashing."""
+
+    def test_source_parses_as_python_39(self):
+        import ast
+
+        source = (Path(qaas_bridge.__file__)).read_text()
+        tree = ast.parse(source, feature_version=(3, 9))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == "datetime":
+                self.assertNotIn("UTC", [a.name for a in node.names], "datetime.UTC needs Python 3.11")
+
+
 if __name__ == "__main__":
     unittest.main()

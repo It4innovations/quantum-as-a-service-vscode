@@ -22,18 +22,42 @@ import re
 import sys
 import tempfile
 import traceback
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from importlib import metadata
 from pathlib import Path
 from typing import Any
 
 MIN_QAAS = (1, 0, 0)
+MIN_PYTHON = (3, 12)
+# The bridge must start on any Python 3.8+ to report an unsuitable interpreter; datetime.UTC needs 3.11.
+UTC = timezone.utc
 MAX_SIM_QUBITS = 24
 TERMINAL_STATES = {"FINISHED", "FAILED", "CANCELED", "CANCELLED"}
 
 
 class BridgeError(Exception):
     """Error with a message meant for the user."""
+
+    kind = "BridgeError"
+
+
+class EnvironmentProblem(BridgeError):
+    """The interpreter cannot run qaas (wrong Python version or missing packages)."""
+
+    kind = "Environment"
+
+
+QAAS_MODULES = ("qheappe_client", "qaas", "qiskit", "iqm", "py4lexis", "py4heappe")
+
+
+def _environment_problem() -> EnvironmentProblem | None:
+    if sys.version_info < MIN_PYTHON:
+        need = f"{MIN_PYTHON[0]}.{MIN_PYTHON[1]}"
+        return EnvironmentProblem(
+            f"Python {sys.version.split()[0]} at {sys.executable} cannot run qaas; it needs Python {need}. "
+            f"Select or create a Python {need} environment with qaas."
+        )
+    return None
 
 
 def _version(dist: str) -> str | None:
@@ -280,6 +304,7 @@ class Server:
             )
         }
         data = {
+            "pythonOk": sys.version_info >= MIN_PYTHON,
             "python": sys.version.split()[0],
             "executable": sys.executable,
             "packages": packages,
@@ -714,10 +739,20 @@ def serve() -> int:
             method = req.get("method", "")
             if method.startswith("_") or not callable(getattr(server, method, None)):
                 raise BridgeError(f"Unknown method: {method}")
-            result = getattr(server, method)(req.get("params") or {})
+            if method != "check" and (problem := _environment_problem()):
+                raise problem
+            try:
+                result = getattr(server, method)(req.get("params") or {})
+            except ModuleNotFoundError as exc:
+                if (exc.name or "").split(".")[0] not in QAAS_MODULES:
+                    raise
+                raise EnvironmentProblem(
+                    f"{exc.name} is not installed in {sys.executable}. Install qaas into this environment "
+                    "or select another interpreter."
+                ) from exc
             response = {"id": req_id, "result": result}
         except BridgeError as exc:
-            response = {"id": req_id, "error": {"type": "BridgeError", "message": str(exc)}}
+            response = {"id": req_id, "error": {"type": exc.kind, "message": str(exc)}}
         except Exception as exc:
             traceback.print_exc(file=sys.stderr)
             response = {"id": req_id, "error": {"type": type(exc).__name__, "message": str(exc)}}

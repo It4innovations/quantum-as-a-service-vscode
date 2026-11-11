@@ -8,3 +8,7 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
 
 [format]
 quote-style = "double"
+
+[lint.per-file-ignores]
+# The bridge starts on any Python 3 to report an unsuitable interpreter: keep it free of 3.11+ APIs.
+"python/qaas_bridge.py" = ["UP017"]

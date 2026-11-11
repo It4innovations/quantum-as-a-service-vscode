@@ -7,6 +7,7 @@ import { type CalibrationEntry, parseOperatorDirectives, pickEntry, shapeOnly } 
 import { isQasm } from "./estimateLens";
 import type { JobManager, JobRecord } from "./jobs";
 import { type OperatorCatalog, shortId } from "./operators";
+import { ensureReady } from "./session";
 
 interface PulsePlan {
   operators: { spec: object; loci: CalibrationEntry["loci"] }[];
@@ -230,7 +231,7 @@ export class QasmCommands {
 
   async transpile(uri?: vscode.Uri): Promise<void> {
     const doc = await this.docFor(uri);
-    if (!doc || !(await requireProject())) {
+    if (!doc || !(await requireProject()) || !(await ensureReady(this.bridge, this.secrets, this.output))) {
       return;
     }
     const target = await currentTarget(this.secrets);
@@ -294,7 +295,11 @@ export class QasmCommands {
       }
       docs.push(d);
     }
-    if (docs.length === 0 || !(await requireProject())) {
+    if (
+      docs.length === 0 ||
+      !(await requireProject()) ||
+      !(await ensureReady(this.bridge, this.secrets, this.output))
+    ) {
       return;
     }
     let use: Record<string, string> = forcedUse ?? {};

@@ -3,11 +3,21 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 import { Analysis } from "./analysis";
 import type { Bridge } from "./bridge";
-import { cfg, currentTarget, expandPath, lexisInstance, lexisToken, sanitize, type Target } from "./config";
+import {
+  cfg,
+  currentTarget,
+  expandPath,
+  lexisInstance,
+  lexisToken,
+  requireProject,
+  sanitize,
+  type Target,
+} from "./config";
 import { instanceLabel, type LexisInstance } from "./core/devEnv";
 import { formatSeconds } from "./core/estimate";
 import type { Counts } from "./core/stats";
 import { ResultsPanel } from "./resultsPanel";
+import { ensureReady } from "./session";
 
 export const TERMINAL = new Set(["FINISHED", "FAILED", "CANCELED", "CANCELLED"]);
 
@@ -229,6 +239,9 @@ export class JobManager implements vscode.Disposable {
     if (!userInitiated && !this.bridge.authenticated && !(await lexisToken(this.secrets))) {
       return;
     }
+    if (userInitiated && !(await ensureReady(this.bridge, this.secrets, this.output))) {
+      return;
+    }
     this.polling = true;
     try {
       for (const r of active) {
@@ -287,6 +300,9 @@ export class JobManager implements vscode.Disposable {
     directory = this.defaultDirectory(r),
     openAfter = false,
   ): Promise<JobRecord | undefined> {
+    if (!(await ensureReady(this.bridge, this.secrets, this.output))) {
+      return undefined;
+    }
     try {
       const res = await vscode.window.withProgress(
         {
@@ -374,7 +390,7 @@ export class JobManager implements vscode.Disposable {
       { modal: true },
       "Cancel Job",
     );
-    if (!ok) {
+    if (!ok || !(await ensureReady(this.bridge, this.secrets, this.output))) {
       return;
     }
     try {
@@ -388,12 +404,11 @@ export class JobManager implements vscode.Disposable {
   }
 
   /** Pull the user's job list from HEAppE, e.g. jobs submitted from scripts or notebooks. */
-  async importFromHeappe(): Promise<void> {
-    const target = await currentTarget(this.secrets);
-    if (!target.project) {
-      vscode.window.showWarningMessage("QaaS: set qaas.lexisProject first.");
-      return;
+  async importFromHeappe(opts: { quiet?: boolean } = {}): Promise<{ found: number; added: number } | undefined> {
+    if (!(await requireProject()) || !(await ensureReady(this.bridge, this.secrets, this.output))) {
+      return undefined;
     }
+    const target = await currentTarget(this.secrets);
     try {
       const jobs = await vscode.window.withProgress(
         {
@@ -432,9 +447,16 @@ export class JobManager implements vscode.Disposable {
           origin: "imported",
         });
       }
-      vscode.window.showInformationMessage(`QaaS: ${jobs.length} jobs found on HEAppE, ${added} new.`);
+      if (!opts.quiet) {
+        vscode.window.showInformationMessage(`QaaS: ${jobs.length} jobs found on HEAppE, ${added} new.`);
+      }
+      return { found: jobs.length, added };
     } catch (e) {
+      if (opts.quiet) {
+        throw e;
+      }
       vscode.window.showErrorMessage(`QaaS: import failed: ${(e as Error).message}`);
+      return undefined;
     }
   }
 }
