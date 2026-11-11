@@ -20,16 +20,8 @@ import { JobManager, type JobRecord, JobStore, JobsTreeProvider, TERMINAL } from
 import { OperatorCatalog, OperatorCommands, type OperatorNode, OperatorsTreeProvider } from "./operators";
 import { resolvePython } from "./python";
 import { QasmCommands, TRANSPILED_SCHEME, TranspiledContentProvider } from "./qasm";
+import { ensureEnvironment, ensureReady, lexisName, signIn, type WhoAmI } from "./session";
 import { WaveformEditor } from "./waveformEditor";
-
-interface CheckData {
-  python: string;
-  executable: string;
-  packages: Record<string, string | null>;
-  importable: boolean;
-  importError?: string;
-  qaasOutdated: boolean;
-}
 
 interface BackendInfo {
   name: string;
@@ -41,49 +33,8 @@ interface BackendInfo {
 
 let output: vscode.OutputChannel;
 
-async function checkEnvironment(bridge: Bridge): Promise<void> {
-  let d: CheckData;
-  try {
-    d = await bridge.request<CheckData>("check");
-  } catch (e) {
-    output.appendLine(`Environment check failed: ${(e as Error).message}`);
-    const c = await vscode.window.showErrorMessage(
-      `QaaS: could not run Python (${(e as Error).message}).`,
-      "Select Interpreter",
-    );
-    if (c) {
-      await vscode.commands.executeCommand("qaas.selectInterpreter");
-    }
-    return;
-  }
-  output.appendLine(`Python ${d.python} at ${d.executable}`);
-  for (const [name, ver] of Object.entries(d.packages)) {
-    output.appendLine(`  ${name}: ${ver ?? "not installed"}`);
-  }
-  if (d.importable && !d.qaasOutdated) {
-    vscode.window.showInformationMessage(`QaaS: qaas ${d.packages.qaas} is ready (Python ${d.python}).`);
-    return;
-  }
-  if (d.importError) {
-    output.appendLine(`  import error: ${d.importError}`);
-  }
-  const msg = d.importable
-    ? `QaaS: qaas ${d.packages.qaas} is older than 1.0.0.`
-    : `QaaS: qaas is not usable in ${d.executable} (${d.importError}).`;
-  const choice = await vscode.window.showWarningMessage(
-    msg,
-    d.importable ? "Upgrade qaas" : "Install qaas",
-    "Select Interpreter",
-  );
-  if (choice === "Select Interpreter") {
-    await selectInterpreter();
-  } else if (choice) {
-    await installQaas(d.executable);
-  }
-}
-
 async function listBackends(context: vscode.ExtensionContext, bridge: Bridge): Promise<void> {
-  if (!(await requireProject())) {
+  if (!(await requireProject()) || !(await ensureReady(bridge, context.secrets, output))) {
     return;
   }
   const target = await currentTarget(context.secrets);
@@ -203,15 +154,11 @@ function updateStatusBar(item: vscode.StatusBarItem): void {
   item.tooltip = `QaaS: ${where}, project ${project || "not set"}${fromFile}. Click to choose a backend.`;
 }
 
-interface WhoAmI {
-  user?: string;
-  issuer?: string;
-  expiresAt?: string;
-  tokenKind: "login" | "refresh" | "access";
-}
-
 /** Log in to the current LEXIS instance and list backends, reporting each step in the output channel. */
 async function testConnection(context: vscode.ExtensionContext, bridge: Bridge): Promise<void> {
+  if (!(await ensureReady(bridge, context.secrets, output))) {
+    return;
+  }
   const target = await currentTarget(context.secrets);
   const where = target.instance ? (target.instance.apiUrl ?? target.instance.aaiUrl) : "production";
   output.show(true);
@@ -249,6 +196,75 @@ async function testConnection(context: vscode.ExtensionContext, bridge: Bridge):
   } catch (e) {
     output.appendLine(`[connection] failed: ${(e as Error).message}`);
     vscode.window.showErrorMessage(`QaaS: connection to LEXIS ${where} failed: ${(e as Error).message}`);
+  }
+}
+
+/**
+ * Synchronize with the LEXIS Platform: sign in (asking how, if needed), check the backend,
+ * import jobs from HEAppE, refresh active jobs and, with pulse operators, the calibration set.
+ */
+async function synchronize(
+  context: vscode.ExtensionContext,
+  bridge: Bridge,
+  jobs: JobManager,
+  catalog: OperatorCatalog,
+): Promise<void> {
+  if (!(await ensureEnvironment(bridge, output)) || !(await requireProject())) {
+    return;
+  }
+  if (!(await ensureReady(bridge, context.secrets, output))) {
+    return;
+  }
+  const name = lexisName();
+  const summary: string[] = [];
+  try {
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: `QaaS: synchronizing with ${name}`, cancellable: true },
+      async (progress, token) => {
+        const target = await currentTarget(context.secrets);
+        progress.report({ message: "signing in…" });
+        const me = await bridge.call<WhoAmI>("whoami", target, {}, token);
+        summary.push(`signed in as ${me.user ?? "?"}`);
+
+        progress.report({ message: "checking backends…" });
+        const backends = await bridge.call<BackendInfo[]>("backends", target, {}, token);
+        const current = backends.find((b) => b.name === target.backend);
+        if (current) {
+          summary.push(`backend ${current.name}${current.resource ? ` on ${current.resource}` : ""}`);
+        } else {
+          summary.push(`backend ${target.backend} not available (${backends.map((b) => b.name).join(", ") || "none"})`);
+        }
+
+        progress.report({ message: "importing jobs…" });
+        const imported = await jobs.importFromHeappe({ quiet: true });
+        if (imported) {
+          summary.push(`${imported.found} jobs on HEAppE, ${imported.added} new`);
+        }
+
+        progress.report({ message: "refreshing active jobs…" });
+        await jobs.poll(true);
+
+        if (catalog.valid().length > 0) {
+          progress.report({ message: "reading the calibration set…" });
+          const info = await catalog.refreshPulseInfo(token);
+          summary.push(`calibration set ${info.calibrationSetId.slice(0, 8)}…`);
+        }
+      },
+    );
+  } catch (e) {
+    output.appendLine(`[sync] failed: ${(e as Error).message}`);
+    vscode.window.showErrorMessage(`QaaS: synchronization with ${name} failed: ${(e as Error).message}`);
+    return;
+  }
+  output.appendLine(`[sync] ${summary.join(" · ")}`);
+  const missing = summary.find((s) => s.includes("not available"));
+  if (missing) {
+    const c = await vscode.window.showWarningMessage(`QaaS: ${summary.join(" · ")}.`, "Choose Backend");
+    if (c) {
+      await listBackends(context, bridge);
+    }
+  } else {
+    vscode.window.showInformationMessage(`QaaS: synchronized with ${name}: ${summary.join(" · ")}.`);
   }
 }
 
@@ -360,7 +376,9 @@ export function activate(context: vscode.ExtensionContext): void {
     devWatcher.onDidDelete(onDevChange),
 
     // environment
-    vscode.commands.registerCommand("qaas.checkEnvironment", () => checkEnvironment(bridge)),
+    vscode.commands.registerCommand("qaas.checkEnvironment", () => ensureEnvironment(bridge, output, true)),
+    vscode.commands.registerCommand("qaas.sync", () => synchronize(context, bridge, jobs, catalog)),
+    vscode.commands.registerCommand("qaas.signIn", () => signIn(bridge, context.secrets, output)),
     vscode.commands.registerCommand("qaas.installPackage", () => installQaas()),
     vscode.commands.registerCommand("qaas.selectInterpreter", () => selectInterpreter()),
     vscode.commands.registerCommand("qaas.createEnvironment", () => createEnvironment()),

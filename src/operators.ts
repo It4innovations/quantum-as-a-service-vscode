@@ -28,6 +28,7 @@ import {
   type TemplateOptions,
   upsertEntry,
 } from "./core/operators";
+import { ensureReady } from "./session";
 
 export const OPERATOR_GLOB = "**/.qaas/operators/*.{yaml,yml,json}";
 const RESULT_GLOB = "**/.qaas/calibrations/*.json";
@@ -609,7 +610,7 @@ export class OperatorCommands {
   }
 
   async refreshCalibration(): Promise<void> {
-    if (!(await requireProject())) {
+    if (!(await requireProject()) || !(await ensureReady(this.bridge, this.secrets, this.output))) {
       return;
     }
     try {

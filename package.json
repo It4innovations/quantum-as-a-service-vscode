@@ -72,12 +72,12 @@
     },
     "viewsWelcome": [
       {
-        "view": "qaas.jobs",
-        "contents": "No jobs yet.\n[New OpenQASM 3 Circuit](command:qaas.newQasmFile)\n[Import Jobs from HEAppE](command:qaas.jobs.import)\nSubmitted jobs are kept across restarts."
-      },
-      {
         "view": "qaas.operators",
         "contents": "No pulse-level operators yet.\n[New Operator](command:qaas.operators.new)\nAn operator is a custom prx pulse (waveform + calibration per qubit and calibration set), stored in .qaas/operators/*.yaml next to your code."
+      },
+      {
+        "view": "qaas.jobs",
+        "contents": "No jobs yet. Synchronize to sign in to the LEXIS Platform and import your jobs from HEAppE.\n[$(sync) Synchronize with LEXIS Platform](command:qaas.sync)\nSign in with the browser or a refresh/access token. [Sign in to LEXIS…](command:qaas.signIn)\nOr run an OpenQASM file: [New OpenQASM 3 File](command:qaas.newQasmFile)"
       }
     ],
     "languages": [
@@ -125,6 +125,18 @@
         "command": "qaas.restartBridge",
         "title": "Restart Python Bridge",
         "category": "QaaS"
+      },
+      {
+        "command": "qaas.sync",
+        "title": "Synchronize with LEXIS Platform",
+        "category": "QaaS",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "qaas.signIn",
+        "title": "Sign in to LEXIS…",
+        "category": "QaaS",
+        "icon": "$(account)"
       },
       {
         "command": "qaas.setToken",
@@ -425,6 +437,11 @@
       ],
       "view/title": [
         {
+          "command": "qaas.sync",
+          "when": "view == qaas.jobs",
+          "group": "navigation@0"
+        },
+        {
           "command": "qaas.jobs.refresh",
           "when": "view == qaas.jobs",
           "group": "navigation@1"
@@ -458,6 +475,11 @@
           "command": "qaas.openDevConnection",
           "when": "view == qaas.jobs",
           "group": "9_connection@2"
+        },
+        {
+          "command": "qaas.signIn",
+          "when": "view == qaas.jobs",
+          "group": "9_connection@0"
         }
       ],
       "view/item/context": [
@@ -764,6 +786,7 @@
     "typescript": "^5.7.2"
   },
   "dependencies": {
-    "yaml": "2.8.1"
+    "yaml": "2.8.1",
+    "yarn": "^1.22.22"
   }
 }
