@@ -1,0 +1,162 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/It4innovations/quantum-as-a-service-vscode/schemas/qaas-operator.schema.json",
+  "title": "QaaS pulse-level operator",
+  "description": "Custom implementation of a quantum gate (prx) for IQM pulse-level access, with calibrations per calibration set.",
+  "type": "object",
+  "required": ["name", "waveform"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "qaas-operator/v1" },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,47}$",
+      "description": "Implementation name registered with the IQM compiler."
+    },
+    "gate": { "enum": ["prx"], "default": "prx", "description": "Quantum operation this operator implements." },
+    "description": { "type": "string" },
+    "parameters": {
+      "type": "object",
+      "description": "Shape parameters, shared by the I and Q waveforms. Built-in waveform fields appear here too.",
+      "propertyNames": { "pattern": "^[a-z][a-z0-9_]{0,31}$" },
+      "additionalProperties": {
+        "oneOf": [
+          { "type": "number" },
+          {
+            "type": "object",
+            "required": ["default"],
+            "additionalProperties": false,
+            "properties": {
+              "default": { "type": "number" },
+              "unit": {
+                "enum": ["", "s", "Hz"],
+                "description": "s: time in seconds (scaled by the pulse duration); Hz: frequency; empty: dimensionless."
+              },
+              "description": { "type": "string" }
+            }
+          }
+        ]
+      }
+    },
+    "waveform": {
+      "type": "object",
+      "required": ["i"],
+      "additionalProperties": false,
+      "properties": {
+        "i": { "$ref": "#/definitions/shape" },
+        "q": {
+          "oneOf": [
+            { "$ref": "#/definitions/shape" },
+            {
+              "type": "object",
+              "required": ["type"],
+              "additionalProperties": false,
+              "properties": {
+                "type": {
+                  "enum": ["zero", "derivative"],
+                  "description": "zero: no Q component; derivative: normalized time derivative of I (DRAG)."
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "calibrations": { "type": "array", "items": { "$ref": "#/definitions/calibration" } }
+  },
+  "definitions": {
+    "shape": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["type", "name"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "builtin" },
+            "name": {
+              "enum": [
+                "Constant",
+                "CosineRiseFall",
+                "CosineRiseFallDerivative",
+                "Gaussian",
+                "GaussianDerivative",
+                "GaussianSmoothedSquare",
+                "TruncatedGaussian",
+                "TruncatedGaussianDerivative",
+                "TruncatedGaussianSmoothedSquare"
+              ],
+              "description": "Waveform from iqm.models.playlist.waveforms."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["type", "expression"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "expression" },
+            "expression": {
+              "type": "string",
+              "description": "Function of t in [-1/2, 1/2] and the parameters. Allowed: + - * / ** %, pi, e, sin cos tan arcsin arccos arctan sinh cosh tanh exp log sqrt abs sign minimum maximum clip where heaviside."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["type", "samples"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "samples" },
+            "samples": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 10000,
+              "items": { "type": "number", "minimum": -1, "maximum": 1 },
+              "description": "Values in [-1, 1], linearly interpolated over the pulse window."
+            }
+          }
+        }
+      ]
+    },
+    "values": {
+      "type": "object",
+      "required": ["duration", "amplitude_i"],
+      "properties": {
+        "duration": { "type": "number", "exclusiveMinimum": 0, "description": "Pulse duration in seconds." },
+        "amplitude_i": { "type": "number", "description": "Scale of the I waveform for a pi rotation." },
+        "amplitude_q": { "type": "number", "description": "Scale of the Q waveform." }
+      },
+      "additionalProperties": { "type": "number", "description": "Value of a shape parameter for this qubit." }
+    },
+    "calibration": {
+      "type": "object",
+      "required": ["calibrationSetId", "loci"],
+      "additionalProperties": false,
+      "properties": {
+        "calibrationSetId": { "type": "string", "description": "IQM calibration set these values were tuned on." },
+        "backend": { "type": "string" },
+        "status": {
+          "enum": ["calibrated", "draft"],
+          "description": "calibrated: measured; draft: unverified (seeded or migrated)."
+        },
+        "updatedAt": { "type": "string" },
+        "note": { "type": "string" },
+        "migratedFrom": { "type": "string" },
+        "verifiedLoci": { "type": "array", "items": { "type": "string" } },
+        "reference": {
+          "type": "object",
+          "description": "Native gate calibration at the time, used to rescale on migration.",
+          "properties": {
+            "implementation": { "type": "string" },
+            "loci": { "type": "object", "additionalProperties": { "type": "object" } }
+          }
+        },
+        "loci": {
+          "type": "object",
+          "description": "Values per qubit, e.g. QB1.",
+          "additionalProperties": { "$ref": "#/definitions/values" }
+        }
+      }
+    }
+  }
+}

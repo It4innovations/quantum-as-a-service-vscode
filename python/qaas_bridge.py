@@ -108,6 +108,7 @@ class Server:
     def __init__(self) -> None:
         self._providers: dict[tuple[str, str | None], Any] = {}
         self._backends: dict[tuple, Any] = {}
+        self._pullas: dict[tuple, Any] = {}
 
     # --- connection -------------------------------------------------------
 
@@ -137,9 +138,28 @@ class Server:
             )
         return self._backends[key]
 
+    def _pulla(self, p: dict):
+        key = (
+            p.get("project"),
+            p.get("token"),
+            p.get("resource") or None,
+            p.get("backend") or None,
+        )
+        if key not in self._pullas:
+            try:
+                self._pullas[key] = self._provider(p).get_pulla(
+                    lexis_resource=p.get("resource") or None,
+                    backend_name=p.get("backend") or None,
+                    job_name=p.get("jobName") or "vscode_pulse_job",
+                )
+            except NotImplementedError as exc:
+                raise BridgeError(str(exc)) from exc
+        return self._pullas[key]
+
     def reset(self, _: dict) -> bool:
         self._providers.clear()
         self._backends.clear()
+        self._pullas.clear()
         return True
 
     def _job(self, p: dict):
@@ -217,9 +237,7 @@ class Server:
             layout = getattr(tqc, "layout", None)
             if layout is not None:
                 with contextlib.suppress(Exception):
-                    out["layout"] = {
-                        str(i): int(phys) for i, phys in enumerate(layout.final_index_layout())
-                    }
+                    out["layout"] = {str(i): int(phys) for i, phys in enumerate(layout.final_index_layout())}
         return out
 
     def submit(self, p: dict) -> dict:
@@ -260,9 +278,7 @@ class Server:
         api = self._backend(p)._qclient.job_management_api
         if api is None:
             raise BridgeError("HEAppE job management API is not available for this backend.")
-        jobs = api.heappe_job_management_list_jobs_for_current_user_get(
-            SessionCode="", Limit=int(p.get("limit", 50))
-        )
+        jobs = api.heappe_job_management_list_jobs_for_current_user_get(SessionCode="", Limit=int(p.get("limit", 50)))
         out = []
         for job in jobs or []:
             d = _jsonable(job)
@@ -285,38 +301,14 @@ class Server:
         """Fetch results of a finished job and write them to p['directory']."""
         state = self.jobInfo(p)["state"]
         if state != "FINISHED":
-            raise BridgeError(
-                f"Job {p['jobId']} is {state}; results are available once it is FINISHED."
-            )
+            raise BridgeError(f"Job {p['jobId']} is {state}; results are available once it is FINISHED.")
         job = self._job(p)
         with_meas = bool(p.get("withMeasurements"))
         result = job.result(qiskit_legacy=True, with_measurements=with_meas)
         counts = result.get_counts()
         counts = counts if isinstance(counts, list) else [counts]
 
-        directory = Path(p["directory"]).expanduser()
-        directory.mkdir(parents=True, exist_ok=True)
-        files = {
-            "counts.json": counts,
-            "raw_artifacts.json": _jsonable(job._cached_raw_results),
-            "job.json": {
-                "jobId": p["jobId"],
-                "project": p.get("project"),
-                "resource": p.get("resource"),
-                "backend": p.get("backend"),
-                "shots": p.get("shots"),
-                "withMeasurements": with_meas,
-                "downloadedAt": datetime.now(UTC).isoformat(),
-                "bitOrder": "Qiskit (rightmost bit = classical bit 0)",
-            },
-        }
-        for name, content in files.items():
-            (directory / name).write_text(json.dumps(content, indent=2, default=str))
-        written = list(files)
-        if with_meas:
-            _write_shots_csv(directory / "shots.csv", p["jobId"], result, len(counts))
-            written.append("shots.csv")
-        return {"directory": str(directory), "files": written, "counts": counts}
+        return _write_results(p, counts, result, _jsonable(job._cached_raw_results), with_meas)
 
     def simulate(self, p: dict) -> list[dict[str, float]]:
         """Exact outcome probabilities of OpenQASM 3 circuits (ideal, noiseless).
@@ -335,8 +327,7 @@ class Server:
                 raise BridgeError(f"Circuit {index}: OpenQASM 3 parse error: {exc}") from exc
             if qc.num_qubits > MAX_SIM_QUBITS:
                 raise BridgeError(
-                    f"Circuit {index} has {qc.num_qubits} qubits; ideal simulation is limited "
-                    f"to {MAX_SIM_QUBITS}."
+                    f"Circuit {index} has {qc.num_qubits} qubits; ideal simulation is limited to {MAX_SIM_QUBITS}."
                 )
             if qc.num_parameters:
                 raise BridgeError(f"Circuit {index} has unbound parameters.")
@@ -369,6 +360,170 @@ class Server:
                 dist[outcome] = dist.get(outcome, 0.0) + float(prob)
             out.append(dist)
         return out
+
+    # --- pulse level ------------------------------------------------------
+
+    def pulseSample(self, p: dict) -> dict:
+        import qaas_pulse
+
+        try:
+            return qaas_pulse.sample(p["spec"], p.get("values") or {}, float(p.get("sampleRate") or 2e9))
+        except qaas_pulse.OperatorError as exc:
+            raise BridgeError(str(exc)) from exc
+
+    def pulseValidate(self, p: dict) -> list[dict]:
+        import qaas_pulse
+
+        try:
+            return qaas_pulse.validate(p["spec"], p.get("loci") or {}, float(p.get("sampleRate") or 2e9))
+        except qaas_pulse.OperatorError as exc:
+            raise BridgeError(str(exc)) from exc
+
+    def pulseCode(self, p: dict) -> str:
+        import qaas_pulse
+
+        try:
+            return qaas_pulse.generate_usage_code(p["operators"], p.get("use") or {}, p.get("note") or "")
+        except qaas_pulse.OperatorError as exc:
+            raise BridgeError(str(exc)) from exc
+
+    def pulseInfo(self, p: dict) -> dict:
+        """Current calibration set, native prx calibration per qubit and drive channel limits."""
+        from qiskit import QuantumCircuit
+
+        pulla = self._pulla(p)
+        compiler = pulla.get_qiskit_compiler()
+        settings = compiler.get_settings(circuits=[QuantumCircuit(1, 1)])
+        native = str(settings.gate_definitions.prx.default_implementation.value)
+        qubits = list(pulla.get_chip_topology().qubits_sorted)
+        loci = {}
+        for q in qubits:
+            entry: dict[str, Any] = {}
+            with contextlib.suppress(Exception):
+                node = settings.gates.prx[native][q]
+                for key in ("duration", "amplitude_i", "amplitude_q"):
+                    with contextlib.suppress(Exception):
+                        entry[key] = float(getattr(node, key).value)
+            with contextlib.suppress(Exception):
+                entry["frequency"] = float(settings.controllers[q].drive.frequency.value)
+            loci[q] = entry
+        sample_rate, granularity, minimum = 2e9, None, None
+        with contextlib.suppress(Exception):
+            props = pulla._executor.get_channel_properties()
+            drive = next(v for k, v in props.items() if "drive" in k.lower())
+            sample_rate = float(drive.sample_rate)
+            granularity = int(drive.instruction_duration_granularity)
+            minimum = int(drive.instruction_duration_min)
+        return {
+            "backend": pulla.quantum_computer_name,
+            "calibrationSetId": str(pulla.backend.architecture.calibration_set_id),
+            "nativeImplementation": native,
+            "qubits": qubits,
+            "loci": loci,
+            "sampleRate": sample_rate,
+            "granularity": granularity,
+            "minSamples": minimum,
+            "fetchedAt": datetime.now(UTC).isoformat(),
+        }
+
+    def submitPulse(self, p: dict) -> dict:
+        """Compile OpenQASM 3 circuits with catalog operators and submit them as a pulse-level job."""
+        import qaas_pulse
+        from qiskit import qasm3
+
+        circuits_q = []
+        for index, src in enumerate(p["sources"]):
+            try:
+                circuits_q.append(qasm3.loads(src))
+            except Exception as exc:
+                raise BridgeError(f"Circuit {index}: OpenQASM 3 parse error: {exc}") from exc
+        operators, use = p.get("operators") or [], p.get("use") or {}
+        pulla = self._pulla(p)
+        circuits, compiler = pulla.qiskit_to_iqm(pulla.backend.transpile(circuits_q))
+        try:
+            qaas_pulse.register(compiler, operators)
+        except qaas_pulse.OperatorError as exc:
+            raise BridgeError(str(exc)) from exc
+        _check_loci(circuits, operators, use)
+        settings = compiler.get_settings(circuits=circuits)
+        qaas_pulse.apply_settings(settings, operators, use)
+        shots = int(p["shots"])
+        settings.set_shots(shots)
+        run_definition, context = compiler.compile(circuits, settings=settings)
+        job = pulla.submit_playlist(run_definition, context=context)
+        return {
+            "jobId": str(job.job_id.int),
+            "shots": shots,
+            "circuits": len(circuits),
+            "calibrationSetId": str(pulla.backend.architecture.calibration_set_id),
+            "submittedAt": datetime.now(UTC).isoformat(),
+        }
+
+    def downloadPulse(self, p: dict) -> dict:
+        """Results of a finished pulse-level job, as counts (same files as circuit jobs)."""
+        from uuid import UUID
+
+        state = self.jobInfo(p)["state"]
+        if state != "FINISHED":
+            raise BridgeError(f"Job {p['jobId']} is {state}; results are available once it is FINISHED.")
+        pulla = self._pulla(p)
+        tracker = pulla.get_job(UUID(int=int(p["jobId"])))
+        shots = int(p.get("shots") or 0)
+        if not shots:
+            raise BridgeError("The number of shots of this pulse job is unknown.")
+        result = pulla.sweep_job_to_qiskit(tracker, shots=shots)
+        counts = result.get_counts()
+        counts = counts if isinstance(counts, list) else [counts]
+        return _write_results(p, counts, result, None, bool(p.get("withMeasurements")))
+
+
+def _check_loci(circuits, operators: list[dict], use: dict[str, str]) -> None:
+    """Every qubit a selected operator acts on needs calibration values."""
+    by_name = {op["spec"]["name"]: op for op in operators}
+    for gate, name in use.items():
+        calibrated = set((by_name.get(name, {}).get("loci") or {}).keys())
+        used = set()
+        with contextlib.suppress(AttributeError, TypeError):
+            for circuit in circuits:
+                for inst in circuit.instructions:
+                    if inst.name == gate:
+                        used.update(inst.locus)
+        missing = sorted(used - calibrated)
+        if missing:
+            raise BridgeError(
+                f"Operator {name!r} has no calibration for {', '.join(missing)}, used by the circuit. "
+                f"Calibrated: {', '.join(sorted(calibrated)) or 'none'}."
+            )
+
+
+def _write_results(p: dict, counts: list, result, raw, with_meas: bool) -> dict:
+    directory = Path(p["directory"]).expanduser()
+    directory.mkdir(parents=True, exist_ok=True)
+    files = {
+        "counts.json": counts,
+        "job.json": {
+            "jobId": p["jobId"],
+            "project": p.get("project"),
+            "resource": p.get("resource"),
+            "backend": p.get("backend"),
+            "shots": p.get("shots"),
+            "withMeasurements": with_meas,
+            "downloadedAt": datetime.now(UTC).isoformat(),
+            "bitOrder": "Qiskit (rightmost bit = classical bit 0)",
+        },
+    }
+    if raw is not None:
+        files["raw_artifacts.json"] = raw
+    for name, content in files.items():
+        (directory / name).write_text(json.dumps(content, indent=2, default=str))
+    written = list(files)
+    if with_meas:
+        try:
+            _write_shots_csv(directory / "shots.csv", p["jobId"], result, len(counts))
+            written.append("shots.csv")
+        except Exception as exc:  # per-shot data is optional
+            print(f"[download] no per-shot measurements: {exc}", file=sys.stderr)
+    return {"directory": str(directory), "files": written, "counts": counts}
 
 
 def serve() -> int:

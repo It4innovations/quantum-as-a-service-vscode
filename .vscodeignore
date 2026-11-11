@@ -11,3 +11,4 @@ requirements-dev.txt
 tsconfig.json
 .vscode-test.mjs
 **/__pycache__/**
+test-fixtures/**

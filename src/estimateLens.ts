@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { cfg } from "./config";
 import { estimate, formatRange, VLQ_BILLING } from "./core/estimate";
+import { parseOperatorDirectives } from "./core/operators";
 import { mentionsQaas, type RunCall, scanRunCalls } from "./core/runScanner";
 
 export const PYTHON_SELECTOR: vscode.DocumentSelector = [
@@ -91,8 +92,23 @@ export class EstimateCodeLensProvider implements vscode.CodeLensProvider {
     const shots = cfg().get<number>("defaultShots") ?? 1024;
     const e = estimate({ shots, circuits: 1 });
     const range = new vscode.Range(0, 0, 0, 0);
+    const use = parseOperatorDirectives(doc.getText()).use;
+    const pulse = Object.entries(use)
+      .map(([g, n]) => `${g}=${n}`)
+      .join(", ");
     return [
-      new vscode.CodeLens(range, { title: "$(play) Run on VLQ", command: "qaas.runQasm", arguments: [doc.uri] }),
+      new vscode.CodeLens(range, {
+        title: `$(play) Run on VLQ${pulse ? ` (${pulse})` : ""}`,
+        tooltip: pulse ? "Pulse-level run with operators from .qaas/operators" : undefined,
+        command: "qaas.runQasm",
+        arguments: [doc.uri],
+      }),
+      new vscode.CodeLens(range, {
+        title: "$(pulse) Run with operator…",
+        tooltip: "Pulse-level run with a custom prx operator from the catalog",
+        command: "qaas.runQasmWithOperator",
+        arguments: [doc.uri],
+      }),
       new vscode.CodeLens(range, {
         title: "$(git-compare) Transpile",
         command: "qaas.transpileQasm",

@@ -83,6 +83,69 @@ Status: ✅ available and tested · 🔶 available, not yet verified against liv
 
 | Feature | Status | Notes |
 | --- | --- | --- |
+| Operators as files (`.qaas/operators/*.yaml`, also `.yml`/`.json`) for custom `prx` pulses | ✅ | Versioned with your code. JSON schema gives completion and checks (with the YAML extension) |
+| Shapes: built-in IQM waveforms, expressions of `t`, sample points; Q channel zero, derivative of I (DRAG) or its own shape | ✅ | One Python code generator for preview, submission and inserted code. Matches IQM's own waveforms sample for sample |
+| Safe expressions | ✅ | Parsed and allowlisted (arithmetic, `pi`, `e`, numpy math functions); a shared catalog cannot run arbitrary code |
+| Pulse Operators view: operators, calibration entries per calibration set, values per qubit | ✅ | Status: calibrated, draft, needs migration |
+| Errors in operator files: YAML, schema, duplicate names, unknown waveforms, expressions, peak amplitude > 1 | ✅ | Deep checks run in Python on save, no login needed |
+| Waveform editor: live I/Q plot, values per qubit, checks against the hardware limits | ✅ | Peak amplitude, sample count, duration granularity, comparison with the native gate |
+| Calibration entries tied to the calibration set they were tuned on | ✅ | Older entries are marked; a calibration set change is reported |
+| Current calibration set and native `prx` values from the backend | 🔶 | `Refresh Current Calibration Set`; cached, re-read before pulse runs after `qaas.calibrationMaxAgeMinutes` |
+| Migrate an operator to the current calibration set | ✅ | Rescale amplitudes by the native gate's change (default) or copy. Result is a draft until verified |
+| Start a draft from the native gate (duration, amplitude) | ✅ | For new operators or new calibration sets |
+| Run OpenQASM 3 at pulse level with operators | 🔶 | `// @qaas operator prx=<name>` in the file, or `Run with operator…`. Asks before using draft or older values |
+| Pulse jobs in the Jobs view, with operators and calibration set; result download | 🔶 | Same results view, CSV exports and notebook as circuit jobs |
+| Insert Python code for an operator (classes, calibration, `register_qaas_operators` / `apply_qaas_operators`) | ✅ | For scripts and notebooks using `QPulla` |
+| Rabi amplitude calibration notebook that writes the result back | 🔶 | Generated per operator and qubit; 7 jobs, estimate shown before creating. The result file is offered for saving into the operator |
+| `defcal` in OpenQASM 3 | 🗓️ | Qiskit's OpenQASM 3 importer does not support `defcal` yet; the comment directive is used instead |
+| Pulse schedule timeline after compilation | 🗓️ | |
+| Ramsey and T1 calibration recipes | 🗓️ | |
+| Operators for other gates (`cz`, `measure`, `move`) | 🗓️ | Only `prx` (`PRX_CustomWaveforms`) for now |
+
+## Operator files
+
+```yaml
+# .qaas/operators/hann_drag.yaml
+schema: qaas-operator/v1
+name: hann_drag                 # implementation name for the IQM compiler
+gate: prx
+description: Hann pulse with DRAG
+parameters:                     # shared by I and Q; unit s = seconds, Hz, or dimensionless
+  width: { default: 0.2 }
+waveform:
+  i: { type: expression, expression: "cos(pi * t) ** 2" }   # t in [-1/2, 1/2] of the pulse
+  q: { type: derivative }                                    # or zero / builtin / expression / samples
+calibrations:
+  - calibrationSetId: 7f3c…      # calibration set the values were tuned on
+    backend: VLQ
+    status: calibrated          # or draft (seeded / migrated, not verified)
+    verifiedLoci: [QB1]
+    reference: { implementation: drag_crf, loci: { QB1: { duration: 4.0e-8, amplitude_i: 0.31 } } }
+    loci:
+      QB1: { duration: 4.0e-8, amplitude_i: 0.42, amplitude_q: 0.02 }
+```
+
+- **Built-in shapes**: `{ type: builtin, name: Gaussian }` and other waveforms from `iqm.models.playlist.waveforms`.
+  Their fields become parameters (time-like ones in seconds).
+- **Expressions**: arithmetic, `**`, `%`, `pi`, `e`, comparisons inside `where`, and `sin cos tan arcsin arccos
+  arctan sinh cosh tanh exp log sqrt abs sign minimum maximum clip where heaviside`.
+- **Samples**: values in [-1, 1], linearly interpolated over the pulse.
+- **Values per qubit**: `duration`, `amplitude_i`, `amplitude_q`, and any parameter to override for that qubit.
+- **OpenQASM 3**: add `// @qaas operator prx=hann_drag` to run the file at pulse level with the operator.
+- **Calibration results** from the Rabi notebook are written to `.qaas/calibrations/*.json`.
+
+## Billing estimate
+
+| Feature | Status | Notes |
+| --- | --- | --- |
+| Estimator in the sidebar: shots, circuits, submissions, circuit time | ✅ | Also lists the submissions found in the active editor |
+| Formula from the [VLQ consumption guide](https://docs.it4i.cz/en/docs/clusters/vlq/vlq-consumption-guide) | ✅ | Checked against the guide's examples in unit tests |
+| Exact circuit time from the transpiled circuit and calibration data (instead of the 0–50 µs range) | 🗓️ | |
+
+### Pulse-level operator catalog
+
+| Feature | Status | Notes |
+| --- | --- | --- |
 | Operators as files (`.qaas/operators/*.yaml`): waveform, parameters, target gate, qubits | 🗓️ | Versioned in git |
 | Each operator tied to the calibration set it was tuned on | 🗓️ | Jobs already record their calibration set |
 | Migrate operators from an old calibration set to the current one | 🗓️ | |
@@ -121,6 +184,8 @@ for budgeting). Submission latency of 3–15 s is not billed.
 | `qaas.downloadMeasurements` | `false` | Also download per-shot measurements |
 | `qaas.autoDownloadResults` | `false` | Download when a job finishes |
 | `qaas.importJobLimit` | `50` | Jobs fetched by `Import Jobs from HEAppE` |
+| `qaas.pulseSampleRate` | `2e9` | Drive sample rate for waveform previews before the calibration set is fetched |
+| `qaas.calibrationMaxAgeMinutes` | `60` | Pulse runs re-read the current calibration set when the cached one is older |
 
 Scripts started with **Run Python File on VLQ** get `LEXIS_PROJECT`, `LEXIS_RESOURCE`,
 `QAAS_BACKEND` and, if set, `LEXIS_TOKEN` as environment variables.
@@ -139,7 +204,8 @@ Library output goes to the **QaaS** output channel.
 npm install
 pip install -r requirements-dev.txt   # ruff
 npm run compile        # or: npm run watch, then F5 for an Extension Development Host
-npm run test:unit      # estimator and code scanner (node --test)
+npm run test:unit      # estimator, scanner, statistics, catalog model (node --test)
+npm run test:py        # Python bridge and operator code generator (needs qaas[iqm_qiskit])
 npm test               # integration tests in a downloaded VS Code
 npm run lint           # Biome (TypeScript/JSON) + Ruff (Python)
 npm run format         # format everything

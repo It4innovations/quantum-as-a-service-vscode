@@ -35,4 +35,48 @@ suite("QaaS extension", () => {
     const lenses = await vscode.commands.executeCommand<vscode.CodeLens[]>("vscode.executeCodeLensProvider", doc.uri);
     assert.ok(lenses.some((l) => l.command?.command === "qaas.runQasm"));
   });
+
+  async function waitFor<T>(fn: () => T | undefined, ms = 8000): Promise<T> {
+    const start = Date.now();
+    for (;;) {
+      const v = fn();
+      if (v) {
+        return v;
+      }
+      if (Date.now() - start > ms) {
+        throw new Error("timed out");
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+
+  test("operator catalog reports problems in operator files", async () => {
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+    assert.ok(root, "fixture workspace not open");
+    const broken = vscode.Uri.joinPath(root, ".qaas", "operators", "broken.yaml");
+    const good = vscode.Uri.joinPath(root, ".qaas", "operators", "hann_drag.yaml");
+    const diags = await waitFor(() => {
+      const d = vscode.languages.getDiagnostics(broken);
+      return d.length > 0 ? d : undefined;
+    });
+    const messages = diags.map((d) => d.message).join("\n");
+    assert.ok(messages.includes("name:"), messages);
+    assert.ok(messages.includes("Unknown built-in waveform"), messages);
+    const goodErrors = vscode.languages
+      .getDiagnostics(good)
+      .filter((d) => d.severity === vscode.DiagnosticSeverity.Error);
+    assert.deepEqual(goodErrors, []);
+  });
+
+  test("OpenQASM files with an operator directive run at pulse level", async () => {
+    const root = vscode.workspace.workspaceFolders![0].uri;
+    const doc = await vscode.workspace.openTextDocument(vscode.Uri.joinPath(root, "bell_pulse.qasm"));
+    const lenses = await vscode.commands.executeCommand<vscode.CodeLens[]>("vscode.executeCodeLensProvider", doc.uri);
+    const titles = lenses.map((l) => l.command?.title ?? "");
+    assert.ok(
+      titles.some((t) => t.includes("Run on VLQ (prx=hann_drag)")),
+      JSON.stringify(titles),
+    );
+    assert.ok(lenses.some((l) => l.command?.command === "qaas.runQasmWithOperator"));
+  });
 });

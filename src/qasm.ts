@@ -3,8 +3,16 @@ import * as vscode from "vscode";
 import type { Bridge } from "./bridge";
 import { cfg, currentTarget, requireProject } from "./config";
 import { estimate, formatRange } from "./core/estimate";
+import { type CalibrationEntry, parseOperatorDirectives, pickEntry, shapeOnly } from "./core/operators";
 import { isQasm } from "./estimateLens";
-import type { JobManager } from "./jobs";
+import type { JobManager, JobRecord } from "./jobs";
+import { type OperatorCatalog, shortId } from "./operators";
+
+interface PulsePlan {
+  operators: { spec: object; loci: CalibrationEntry["loci"] }[];
+  use: Record<string, string>;
+  used: NonNullable<JobRecord["operators"]>;
+}
 
 interface CircuitStats {
   numQubits: number;
@@ -56,6 +64,7 @@ export class QasmCommands {
     private readonly secrets: vscode.SecretStorage,
     private readonly transpiled: TranspiledContentProvider,
     private readonly output: vscode.OutputChannel,
+    private readonly catalog: OperatorCatalog,
   ) {}
 
   register(): vscode.Disposable[] {
@@ -81,9 +90,10 @@ export class QasmCommands {
     if (!isQasm(doc) || doc.uri.scheme === TRANSPILED_SCHEME || !cfg().get<boolean>("validateQasm", true)) {
       return;
     }
+    const directiveProblems = this.directiveDiagnostics(doc);
     try {
       await this.bridge.request<AnalyzeResult>("analyze", { source: doc.getText() });
-      this.diagnostics.delete(doc.uri);
+      this.diagnostics.set(doc.uri, directiveProblems);
     } catch (e) {
       const msg = (e as Error).message;
       if ((e as { type?: string }).type !== "BridgeError") {
@@ -100,8 +110,122 @@ export class QasmCommands {
           msg.replace(/^OpenQASM 3 parse error:\s*"?(\d+,\d+:\s*)?/, "").replace(/"$/, ""),
           vscode.DiagnosticSeverity.Error,
         ),
+        ...directiveProblems,
       ]);
     }
+  }
+
+  /** `// @qaas operator prx=name` must name an operator of the catalog. */
+  private directiveDiagnostics(doc: vscode.TextDocument): vscode.Diagnostic[] {
+    const { use, lines } = parseOperatorDirectives(doc.getText());
+    const out: vscode.Diagnostic[] = [];
+    for (const [gate, name] of Object.entries(use)) {
+      const op = this.catalog.byName(name);
+      const range = doc.lineAt(lines[gate]).range;
+      if (!op) {
+        out.push(
+          new vscode.Diagnostic(range, `No operator "${name}" in .qaas/operators.`, vscode.DiagnosticSeverity.Warning),
+        );
+      } else if ((op.spec.gate ?? "prx") !== gate) {
+        out.push(
+          new vscode.Diagnostic(
+            range,
+            `Operator "${name}" implements ${op.spec.gate}, not ${gate}.`,
+            vscode.DiagnosticSeverity.Error,
+          ),
+        );
+      }
+    }
+    return out;
+  }
+
+  /** Choose a catalog operator, then run the file at pulse level with it. */
+  async runWithOperator(uri?: vscode.Uri): Promise<void> {
+    const ops = this.catalog.valid();
+    if (ops.length === 0) {
+      const c = await vscode.window.showInformationMessage("QaaS: the operator catalog is empty.", "New Operator…");
+      if (c) {
+        await vscode.commands.executeCommand("qaas.operators.new");
+      }
+      return;
+    }
+    const current = this.catalog.pulseInfo()?.calibrationSetId;
+    const pick = await vscode.window.showQuickPick(
+      ops.map((o) => {
+        const entry = o.spec.calibrations?.find((c) => c.calibrationSetId === current);
+        return {
+          label: o.spec.name,
+          description: `${o.spec.gate ?? "prx"} · ${entry ? (entry.status ?? "draft") : current ? "no entry for the current set" : "calibration set unknown"}`,
+          detail: o.spec.description,
+          name: o.spec.name,
+          gate: o.spec.gate ?? "prx",
+        };
+      }),
+      { title: "Run at pulse level with operator", placeHolder: "Tip: add  // @qaas operator prx=<name>  to the file" },
+    );
+    if (pick) {
+      await this.run(uri, undefined, { [pick.gate]: pick.name });
+    }
+  }
+
+  /** Resolve operators and their calibration for the current set; asks when it is missing or a draft. */
+  private async planPulse(use: Record<string, string>): Promise<PulsePlan | undefined> {
+    let info: Awaited<ReturnType<OperatorCatalog["ensurePulseInfo"]>>;
+    try {
+      info = await this.catalog.ensurePulseInfo();
+    } catch (e) {
+      vscode.window.showErrorMessage(`QaaS: could not read the current calibration set: ${(e as Error).message}`);
+      return undefined;
+    }
+    const plan: PulsePlan = { operators: [], use, used: [] };
+    for (const [gate, name] of Object.entries(use)) {
+      const op = this.catalog.byName(name);
+      if (!op) {
+        vscode.window.showErrorMessage(`QaaS: no operator "${name}" in .qaas/operators.`);
+        return undefined;
+      }
+      if ((op.spec.gate ?? "prx") !== gate) {
+        vscode.window.showErrorMessage(`QaaS: operator "${name}" implements ${op.spec.gate}, not ${gate}.`);
+        return undefined;
+      }
+      let cal = op.spec.calibrations?.find((c) => c.calibrationSetId === info.calibrationSetId);
+      if (!cal) {
+        const latest = pickEntry(op.spec, info.calibrationSetId);
+        const actions = latest ? ["Migrate…", "Use Old Values"] : ["Start from Native Gate"];
+        const choice = await vscode.window.showWarningMessage(
+          `${name} has no calibration for the current calibration set ${shortId(info.calibrationSetId)}.`,
+          {
+            modal: true,
+            detail: latest
+              ? `Its latest values were tuned on set ${shortId(latest.calibrationSetId)}. Migrate them (then verify), or run with the old values.`
+              : "It has no calibration values yet.",
+          },
+          ...actions,
+        );
+        if (choice === "Use Old Values" && latest) {
+          cal = latest;
+        } else {
+          if (choice === "Migrate…") {
+            await vscode.commands.executeCommand("qaas.operators.migrate", { kind: "operator", entry: op });
+          } else if (choice === "Start from Native Gate") {
+            await vscode.commands.executeCommand("qaas.operators.seed", { kind: "operator", entry: op });
+          }
+          return undefined;
+        }
+      } else if (cal.status !== "calibrated") {
+        const ok = await vscode.window.showWarningMessage(
+          `${name}: the values for the current calibration set are a draft (not verified on hardware).`,
+          { modal: true },
+          "Run Anyway",
+        );
+        if (!ok) {
+          return undefined;
+        }
+      }
+      plan.operators.push({ spec: shapeOnly(op.spec), loci: cal.loci });
+      plan.used.push({ name, gate, calibrationSetId: cal.calibrationSetId, status: cal.status ?? "draft" });
+    }
+    return plan;
   }
 
   async transpile(uri?: vscode.Uri): Promise<void> {
@@ -155,8 +279,8 @@ export class QasmCommands {
     }
   }
 
-  /** Submit one .qasm file, or several selected in the explorer as one job. */
-  async run(uri?: vscode.Uri, selected?: vscode.Uri[]): Promise<void> {
+  /** Submit one .qasm file, or several selected in the explorer as one job. Operators: directives or `forcedUse`. */
+  async run(uri?: vscode.Uri, selected?: vscode.Uri[], forcedUse?: Record<string, string>): Promise<void> {
     const uris =
       selected && selected.length > 1 ? selected.filter((u) => u.fsPath.toLowerCase().endsWith(".qasm")) : [uri];
     const docs: vscode.TextDocument[] = [];
@@ -173,6 +297,27 @@ export class QasmCommands {
     if (docs.length === 0 || !(await requireProject())) {
       return;
     }
+    let use: Record<string, string> = forcedUse ?? {};
+    if (!forcedUse) {
+      for (const d of docs) {
+        for (const [gate, name] of Object.entries(parseOperatorDirectives(d.getText()).use)) {
+          if (use[gate] && use[gate] !== name) {
+            vscode.window.showErrorMessage(
+              `QaaS: the selected files ask for different ${gate} operators (${use[gate]}, ${name}).`,
+            );
+            return;
+          }
+          use = { ...use, [gate]: name };
+        }
+      }
+    }
+    const pulse = Object.keys(use).length > 0 ? await this.planPulse(use) : undefined;
+    if (Object.keys(use).length > 0 && !pulse) {
+      return;
+    }
+    const pulseText = pulse
+      ? `\nPulse level: ${pulse.used.map((u) => `${u.gate}=${u.name} (set ${shortId(u.calibrationSetId)}, ${u.status})`).join(", ")}`
+      : "";
     const target = await currentTarget(this.secrets);
     const defaultShots = cfg().get<number>("defaultShots") ?? 1024;
     const shotsText = await vscode.window.showInputBox({
@@ -209,7 +354,7 @@ export class QasmCommands {
           detail:
             `${docs.length} circuit${docs.length === 1 ? "" : "s"} × ${shots.toLocaleString()} shots\n` +
             `Estimated billed QPU time: ${formatRange(est)} (${est.vlqJobs} VLQ job${est.vlqJobs === 1 ? "" : "s"})\n` +
-            `Project ${target.project}${target.resource ? `, resource ${target.resource}` : ""}`,
+            `Project ${target.project}${target.resource ? `, resource ${target.resource}` : ""}${pulseText}`,
         },
         "Submit",
       );
@@ -221,7 +366,15 @@ export class QasmCommands {
     try {
       const res = await vscode.window.withProgress(
         { location: vscode.ProgressLocation.Notification, title: `QaaS: submitting "${jobName}"…`, cancellable: true },
-        (_p, token) => this.bridge.call<SubmitResult>("submit", target, { sources, shots, jobName }, token),
+        (_p, token) =>
+          pulse
+            ? this.bridge.call<SubmitResult>(
+                "submitPulse",
+                target,
+                { sources, shots, jobName, operators: pulse.operators, use: pulse.use },
+                token,
+              )
+            : this.bridge.call<SubmitResult>("submit", target, { sources, shots, jobName }, token),
       );
       await this.jobs.track({
         jobId: res.jobId,
@@ -237,6 +390,8 @@ export class QasmCommands {
         source: docs.map((d) => vscode.workspace.asRelativePath(d.uri)).join(", "),
         estimate: { low: est.low, high: est.high },
         qasmSources: sources.join("").length <= MAX_STORED_SOURCE ? sources : undefined,
+        kind: pulse ? "pulse" : "circuit",
+        operators: pulse?.used,
         origin: "extension",
       });
       vscode.window.showInformationMessage(`QaaS: submitted job #${res.jobId} (est. ${formatRange(est)} billed).`);
