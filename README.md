@@ -111,6 +111,8 @@ Status: ✅ available and tested (live items verified on VLQ, 2026-11-11) · �
 | Start a draft from the native gate (duration, amplitude) | ✅ | For new operators or new calibration sets |
 | Run OpenQASM 3 at pulse level with operators | ✅ | `// @qaas operator prx=<name>` in the file, or `Run with operator…`. Asks before using draft or older values |
 | Pulse jobs in the Jobs view, with operators and calibration set; result download | ✅ | Same results view, CSV exports and notebook as circuit jobs. Also after a restart: the job is recompiled from its stored sources and operators to map results to bits |
+| Pulse-level jobs marked in the Jobs view (pulse icon, `pulse-level`), including imported ones (HEAppE task `qpulla_pulse_task`) | ✅ | Imported pulse jobs (notebooks, scripts) are downloaded by rebuilding counts from their raw per-qubit readouts (`QB1__c_2_0_1` = qubit, register, bit); identical to the exact conversion on VLQ. For parameter sweeps the shots of all sweep points are combined |
+| Jobs whose results could not be fetched: warning icon, orange label, reason in the tooltip | ✅ | Cleared by the next successful download |
 | Insert Python code for an operator (classes, calibration, `register_qaas_operators` / `apply_qaas_operators`) | ✅ | For scripts and notebooks using `QPulla` |
 | Rabi amplitude calibration notebook that writes the result back | ✅ | Generated per operator and qubit; 7 jobs, estimate shown before creating. Fits the Rabi curve to all rounds (weighted by shots). Uses `LEXIS_TOKEN` when set, otherwise the browser login. The result file is offered for saving into the operator |
 | `defcal` in OpenQASM 3 | 🗓️ | Qiskit's OpenQASM 3 importer does not support `defcal` yet; the comment directive is used instead |

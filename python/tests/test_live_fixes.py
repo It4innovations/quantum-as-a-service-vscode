@@ -78,14 +78,20 @@ class CancelTests(unittest.TestCase):
 
 
 class PulseDownloadTests(unittest.TestCase):
-    def test_unknown_pulse_job_without_sources_is_explained(self):
+    def test_pulse_job_submitted_elsewhere_is_rebuilt_from_raw_readouts(self):
+        import tempfile
+
+        import numpy as np
+
         server = qaas_bridge.Server()
         server.jobInfo = lambda p: {"state": "FINISHED"}
-        server._pulla = lambda p: object()
-        sys.modules.setdefault("iqm.station_control.client.job_trackers", types.SimpleNamespace(RunJobTracker=object))
-        with self.assertRaises(qaas_bridge.BridgeError) as ctx:
-            server.downloadPulse({**TARGET, "jobId": "441", "shots": 1000})
-        self.assertIn("submitted elsewhere", str(ctx.exception))
+        executor = mock.Mock()
+        executor.get_artifact_sweep_results.return_value = {"QB1__c_1_0_0": [np.array([1.0, 1.0, 0.0])]}
+        server._pulla = lambda p: types.SimpleNamespace(executor=executor)
+        with tempfile.TemporaryDirectory() as tmp:
+            out = server.downloadPulse({**TARGET, "jobId": "134", "shots": 3, "directory": tmp})
+        self.assertEqual(out["counts"], [{"1": 2, "0": 1}])
+        self.assertIn("raw readouts", out["note"])
 
 
 class EnvironmentTests(unittest.TestCase):
@@ -213,6 +219,33 @@ class MissingCircuitResultsTests(unittest.TestCase):
         with self.assertRaises(qaas_bridge.BridgeError) as ctx:
             server.download({**TARGET, "jobId": "134", "shots": 1000, "directory": "/tmp/x"})
         self.assertIn("pulse-level job", str(ctx.exception))
+
+
+class PulseRawReadoutTests(unittest.TestCase):
+    def test_readouts_become_qiskit_bitstrings(self):
+        import numpy as np
+
+        sweep = {
+            "QB1__c_2_0_0": [np.array([0.0, 1.0, 1.0, 0.0])],
+            "QB2__c_2_0_1": [np.array([0.0, 1.0, 0.0, 1.0])],
+        }
+        memory, summary = qaas_bridge._sweep_memory(sweep)
+        self.assertEqual(memory, ["00", "11", "01", "10"], "c[1] is the left bit, c[0] the right one")
+        self.assertEqual(summary["recordedShots"], 4)
+        self.assertEqual(summary["readouts"]["QB2__c_2_0_1"]["p1"], 0.5)
+
+    def test_sweep_note(self):
+        note = qaas_bridge._pulse_raw_summary({"shots": 500}, {"recordedShots": 7500, "readouts": {}})["note"]
+        self.assertIn("15 points of 500 shots", note)
+
+    def test_job_kind_from_task_name(self):
+        api = mock.Mock()
+        pulse = mock.Mock()
+        pulse.to_dict.return_value = {"id": 5, "state": 16, "tasks": [{"id": 5, "name": "qpulla_pulse_task"}]}
+        api.heappe_job_management_list_jobs_for_current_user_get.return_value = [pulse]
+        server = FakeServer(types.SimpleNamespace(job_management_api=api))
+        server._heappe_user_id = lambda qclient: None
+        self.assertEqual(server.listJobs({**TARGET, "limit": 5})[0]["kind"], "pulse")
 
 
 if __name__ == "__main__":

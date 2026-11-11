@@ -13,6 +13,8 @@
 - Python environments: discovery of venv, conda and pyenv interpreters; create a 3.12 venv or conda env; install qaas as a VS Code task.
 - Pulse-level operator catalog: `.qaas/operators/*.yaml` with JSON schema, Pulse Operators view, waveform editor with live preview and hardware checks, calibration entries per calibration set, migration (native-amplitude rescaling), pulse-level OpenQASM runs (`// @qaas operator prx=<name>`), pulse jobs in the Jobs view, Python code insertion, and a Rabi calibration notebook whose result is written back.
 - LEXIS test instance and other instances: `qaas.lexisAaiUrl` / `qaas.lexisApiUrl` / `qaas.lexisRealm`, or a git-ignored `.qaas/dev.env` with URLs, project, resource and token; refresh/offline tokens renewed automatically; jobs remember their instance; `QaaS: Test LEXIS Connection`; status bar marks non-production instances.
+- Pulse-level jobs: marked in the Jobs view (also imported ones, from the HEAppE task name); imported pulse jobs are downloaded by rebuilding counts from raw readouts.
+- Jobs whose results could not be fetched get a warning icon, an orange label and the reason in the tooltip.
 - Calibrations view and panel: current and known calibration sets, per-qubit metrics (tiles, dot plot, chip diagram, table), comparison of two sets, CSV export.
 - Jobs view: "Own and accessible" and "Other users' jobs (no access)" groups, labelled by LEXIS resource; no actions or polling for other users' jobs.
 - README: platform support section (Windows and Linux to be checked).
