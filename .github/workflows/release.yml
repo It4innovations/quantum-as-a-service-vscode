@@ -1,0 +1,43 @@
+name: Release VSIX
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # Use the release tag (v1.2.3 or 1.2.3) as the extension version.
+      - name: Set version from tag
+        if: github.event_name == 'release'
+        run: npm version --no-git-tag-version --allow-same-version "${GITHUB_REF_NAME#v}"
+
+      - name: Package extension
+        run: |
+          npx vsce package --out "qaas-vscode-$(node -p 'require("./package.json").version').vsix"
+          echo "VSIX=$(ls *.vsix)" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.VSIX }}
+          path: ${{ env.VSIX }}
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" "$VSIX" --clobber
