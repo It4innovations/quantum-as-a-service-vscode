@@ -24,7 +24,7 @@ Status: ✅ available and tested (live items verified on VLQ, 2026-11-11) · �
 | **Synchronize with LEXIS Platform**: sign in, check the backend, import jobs from HEAppE, refresh active jobs and the calibration set | 🔶 | Jobs view title bar and welcome screen. Each step is verified on VLQ; the combined flow is new |
 | Sign-in prompt before any LEXIS command when not signed in: browser login, paste a refresh/access token, or a dev connection file | 🔶 | `QaaS: Sign in to LEXIS…` switches account or method |
 | LEXIS browser login, kept for the whole VS Code session | 🔶 | The login URL is also offered as a notification (works on remote hosts) |
-| LEXIS token in VS Code secret storage | ✅ | `QaaS: Set LEXIS Token` / `Clear LEXIS Token and Log Out`. A refresh/offline token is renewed automatically; an access token is used as is. Verified with both on production and the test instance |
+| LEXIS token in VS Code secret storage | ✅ | `QaaS: Set LEXIS Token` / `Log Out of LEXIS` (also in the Jobs view's ⋯ menu). A refresh/offline token is renewed automatically; an access token is used as is. Tokens are stored per LEXIS instance and only sent to that instance. Log out revokes the refresh tokens on the server (stored ones and this session's browser logins) and clears them; a token in the dev file or `QAAS_LEXIS_TOKEN` is revoked only if you confirm, since other tools may share it. Verified with both on production and the test instance |
 | Other LEXIS instances (test instance) via settings or a git-ignored dev connection file | ✅ | See [Testing against the LEXIS test instance](#testing-against-the-lexis-test-instance). Status bar shows `LEXIS test`; jobs remember their instance |
 | `QaaS: Test LEXIS Connection` | ✅ | Logs in, shows the user and token expiry, lists backends |
 | List backends and choose the default | ✅ | Status bar shows the current backend |
@@ -207,7 +207,7 @@ for budgeting). Submission latency of 3–15 s is not billed.
 
 | Setting | Default | Description |
 | --- | --- | --- |
-| `qaas.pythonPath` | *(empty)* | Python 3.12 with qaas. Empty uses the Python extension's selection, then `python3` |
+| `qaas.pythonPath` | *(empty)* | Python 3.12 with qaas. Empty uses the Python extension's selection, then `python3`. A value from workspace settings is used only after you allow it once (interpreters picked with **Select Python Interpreter** are allowed automatically); the same applies to `qaas.condaPath` |
 | `qaas.condaPath` | *(empty)* | `conda` executable when it is not found automatically |
 | `qaas.packageExtra` | `iqm_qiskit` | IQM extra installed with qaas |
 | `qaas.lexisProject` | *(empty)* | LEXIS project identifier |
@@ -230,8 +230,12 @@ for budgeting). Submission latency of 3–15 s is not billed.
 | `qaas.calibrationMaxAgeMinutes` | `60` | Pulse runs re-read the current calibration set when the cached one is older |
 
 Scripts started with **Run Python File on VLQ** get `LEXIS_PROJECT`, `LEXIS_RESOURCE`,
-`QAAS_BACKEND` and, if set, `LEXIS_TOKEN`, `PY4LEXIS_AAI_URL`, `PY4LEXIS_API_URL` and
-`PY4LEXIS_REALM` as environment variables.
+`QAAS_BACKEND`, `LEXIS_TOKEN` and, for a non-production instance, `PY4LEXIS_AAI_URL`,
+`PY4LEXIS_API_URL` and `PY4LEXIS_REALM` as environment variables. `LEXIS_TOKEN` is always a
+short-lived **access token** issued by the bridge (also after a browser login), never the stored
+refresh token, because everything started in that terminal can read it. Scripts that still need
+LEXIS after it expires (usually minutes; the expiry is shown when the script starts) must be run
+again.
 
 ## Testing against the LEXIS test instance
 
@@ -259,8 +263,18 @@ QAAS_LEXIS_TOKEN=<refresh or offline token>
 - **QaaS: Test LEXIS Connection** logs in, prints the user, token kind and expiry, and lists the
   backends in the **QaaS** output channel.
 - Instead of the file, the URLs can be set with `qaas.lexisAaiUrl`, `qaas.lexisApiUrl` and
-  `qaas.lexisRealm` (e.g. in workspace settings), and the token with **Set LEXIS Token** or the
-  `QAAS_LEXIS_TOKEN` environment variable. Token order: dev file, secret storage, environment.
+  `qaas.lexisRealm` (e.g. in workspace settings), and the token with **Set LEXIS Token**.
+- A token is only ever sent to the instance it belongs to. Order: the dev file's token (when the
+  file selects that instance), the token stored for that instance with **Set LEXIS Token** or
+  **Sign in**, then the `QAAS_LEXIS_TOKEN` environment variable (production only). A workspace or
+  dev file that points at another server therefore gets no stored token; sign in again there.
+- The extension is disabled in untrusted (Restricted Mode) workspaces. In trusted ones, values a
+  cloned repository could plant are used only after you allow them once per folder: a
+  non-production LEXIS login set by workspace settings or the dev file (the browser login would
+  show that server's page), `qaas.pythonPath` / `qaas.condaPath` from workspace settings, an
+  interpreter inside the workspace picked by the Python extension, and a workspace
+  `qaas.resultsDirectory` outside the workspace. Instances and paths from your user settings
+  need no approval.
 
 ## How it works
 
@@ -268,7 +282,9 @@ The extension does not reimplement the client. It starts
 [`python/qaas_bridge.py`](python/qaas_bridge.py) once with your interpreter and talks to it
 over stdin/stdout (one JSON request and response per line). The process keeps the LEXIS login
 and HEAppE clients alive, and calls `qheappe_client` (`QProvider`, `QBackend`, `QJob`).
-Library output goes to the **QaaS** output channel.
+Library output goes to the **QaaS** output channel. py4lexis writes its log (no tokens) to
+`lexis.log` in the extension's log folder (**Developer: Open Extension Logs Folder**), readable
+by your user only.
 
 ## Development
 

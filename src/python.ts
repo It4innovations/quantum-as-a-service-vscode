@@ -1,9 +1,12 @@
 import * as vscode from "vscode";
-import { cfg } from "./config";
+import { trustedInterpreter, trustedSetting } from "./trust";
 
-/** Resolve the interpreter: qaas.pythonPath, then the Python extension's selection, then python3. */
+/**
+ * Resolve the interpreter: qaas.pythonPath (a workspace value only once approved), then the
+ * Python extension's selection (one inside the workspace only once approved), then python3.
+ */
 export async function resolvePython(): Promise<string> {
-  const configured = cfg().get<string>("pythonPath");
+  const configured = await trustedSetting("pythonPath");
   if (configured) {
     return configured;
   }
@@ -14,7 +17,7 @@ export async function resolvePython(): Promise<string> {
       const env = api?.environments?.getActiveEnvironmentPath?.(vscode.workspace.workspaceFolders?.[0]?.uri);
       const resolved = env && (await api.environments.resolveEnvironment(env));
       const exe: string | undefined = resolved?.executable?.uri?.fsPath;
-      if (exe) {
+      if (exe && (await trustedInterpreter(exe))) {
         return exe;
       }
     } catch {

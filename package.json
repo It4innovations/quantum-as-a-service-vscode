@@ -1,7 +1,7 @@
 {
   "name": "qaas-vscode",
   "displayName": "Quantum-as-a-Service (QHEAppE)",
-  "description": "Run OpenQASM 3 and Qiskit circuits on the VLQ quantum computer through LEXIS and HEAppE: job manager, result downloads, billed-time estimates.",
+  "description": "Run OpenQASM 3 and Qiskit circuits on the VLQ quantum computer through LEXIS and HEAppE: job manager, result downloads, billed-time estimates. AI tools were used to help implement this extension.",
   "version": "0.0.1",
   "publisher": "it4innovations",
   "author": {
@@ -13,10 +13,6 @@
     },
     {
       "name": "Ing. Jan Martinovič, Ph.D."
-    },
-    {
-      "name": "Claude Opus 5.5 (Anthropic)",
-      "url": "https://claude.com/claude-code"
     }
   ],
   "license": "Apache-2.0",
@@ -39,6 +35,13 @@
     "HEAppE",
     "QHEAppE"
   ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "QaaS runs the workspace's Python interpreter and sends your LEXIS token to the LEXIS instance the workspace configures."
+    },
+    "virtualWorkspaces": false
+  },
   "activationEvents": [
     "onStartupFinished"
   ],
@@ -164,8 +167,9 @@
       },
       {
         "command": "qaas.clearToken",
-        "title": "Clear LEXIS Token and Log Out",
-        "category": "QaaS"
+        "title": "Log Out of LEXIS",
+        "category": "QaaS",
+        "icon": "$(sign-out)"
       },
       {
         "command": "qaas.listBackends",
@@ -536,17 +540,17 @@
         {
           "command": "qaas.testConnection",
           "when": "view == qaas.jobs",
-          "group": "9_connection@1"
-        },
-        {
-          "command": "qaas.openDevConnection",
-          "when": "view == qaas.jobs",
           "group": "9_connection@2"
         },
         {
           "command": "qaas.signIn",
           "when": "view == qaas.jobs",
           "group": "9_connection@0"
+        },
+        {
+          "command": "qaas.clearToken",
+          "when": "view == qaas.jobs",
+          "group": "9_connection@1"
         },
         {
           "command": "qaas.calibrations.refresh",
@@ -893,7 +897,6 @@
     "typescript": "^5.7.2"
   },
   "dependencies": {
-    "yaml": "2.8.1",
-    "yarn": "^1.22.22"
+    "yaml": "2.8.4"
   }
 }

@@ -3,21 +3,13 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 import { Analysis } from "./analysis";
 import type { Bridge } from "./bridge";
-import {
-  cfg,
-  currentTarget,
-  expandPath,
-  lexisInstance,
-  lexisToken,
-  requireProject,
-  sanitize,
-  type Target,
-} from "./config";
-import { instanceLabel, type LexisInstance, normalizeInstance } from "./core/devEnv";
+import { cfg, currentTarget, expandPath, lexisToken, requireProject, sanitize, type Target } from "./config";
+import { instanceLabel, isJobId, type LexisInstance, normalizeInstance } from "./core/devEnv";
 import { formatSeconds } from "./core/estimate";
 import type { Counts } from "./core/stats";
 import { ResultsPanel } from "./resultsPanel";
 import { ensureReady } from "./session";
+import { trustedSetting } from "./trust";
 
 export const TERMINAL = new Set(["FINISHED", "FAILED", "CANCELED", "CANCELLED"]);
 
@@ -112,10 +104,6 @@ function heappeTime(t?: string): string {
 const STORE_KEY = "qaas.jobs";
 const key = (r: { project: string; jobId: string; instance?: LexisInstance }) =>
   `${r.instance?.apiUrl ? `${r.instance.apiUrl}|` : ""}${r.project}:${r.jobId}`;
-const sameInstance = (a?: LexisInstance, b?: LexisInstance) =>
-  (a?.aaiUrl ?? "") === (b?.aaiUrl ?? "") &&
-  (a?.apiUrl ?? "") === (b?.apiUrl ?? "") &&
-  (a?.realm ?? "") === (b?.realm ?? "");
 
 /** Job history in globalState, so it survives restarts and is shared across workspaces. */
 export class JobStore {
@@ -136,6 +124,9 @@ export class JobStore {
   }
 
   async upsert(rec: JobRecord): Promise<void> {
+    if (!isJobId(rec.jobId)) {
+      throw new Error(`Unexpected HEAppE job ID ${JSON.stringify(rec.jobId)}`);
+    }
     const map = new Map(this.all().map((r) => [key(r), r]));
     map.set(key(rec), { ...map.get(key(rec)), ...rec });
     await this.save([...map.values()]);
@@ -377,13 +368,13 @@ export class JobManager implements vscode.Disposable {
     clearInterval(this.timer);
   }
 
-  /** Target of a stored job. The current token is used only if it belongs to the job's LEXIS instance. */
+  /** Target of a stored job, with the token stored for the job's LEXIS instance (if any). */
   private async targetFor(r: JobRecord): Promise<Target> {
     return {
       project: r.project,
       resource: r.resource,
       backend: r.backend,
-      token: sameInstance(r.instance, lexisInstance()) ? await lexisToken(this.secrets) : undefined,
+      token: await lexisToken(this.secrets, r.instance),
       instance: r.instance,
     };
   }
@@ -455,18 +446,22 @@ export class JobManager implements vscode.Disposable {
     void vscode.commands.executeCommand("qaas.jobs.focus");
   }
 
-  defaultDirectory(r: JobRecord): string {
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: VS Code-style variables, expanded by expandPath
-    const template = cfg().get<string>("resultsDirectory") || "${workspaceFolder}/qaas-results/${jobId}-${jobName}";
-    return expandPath(template, { jobId: r.jobId, jobName: sanitize(r.name || "job"), project: sanitize(r.project) });
+  /** Results folder from qaas.resultsDirectory; a workspace value outside the workspace only once approved. */
+  async defaultDirectory(r: JobRecord): Promise<string> {
+    const template =
+      (await trustedSetting("resultsDirectory")) ||
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: VS Code-style variables, expanded by expandPath
+      "${workspaceFolder}/qaas-results/${jobId}-${jobName}";
+    return expandPath(template, {
+      jobId: sanitize(r.jobId),
+      jobName: sanitize(r.name || "job"),
+      project: sanitize(r.project),
+    });
   }
 
   /** Download results; with openAfter the results view opens directly instead of a notification. */
-  async download(
-    r: JobRecord,
-    directory = this.defaultDirectory(r),
-    openAfter = false,
-  ): Promise<JobRecord | undefined> {
+  async download(r: JobRecord, directory?: string, openAfter = false): Promise<JobRecord | undefined> {
+    directory ??= await this.defaultDirectory(r);
     if (!(await ensureReady(this.bridge, this.secrets, this.output))) {
       return undefined;
     }
@@ -558,7 +553,7 @@ export class JobManager implements vscode.Disposable {
       return;
     }
     for (const r of recs) {
-      await this.download(r, path.join(picked[0].fsPath, `${r.jobId}-${sanitize(r.name || "job")}`));
+      await this.download(r, path.join(picked[0].fsPath, `${sanitize(r.jobId)}-${sanitize(r.name || "job")}`));
     }
   }
 
@@ -690,6 +685,10 @@ export class JobManager implements vscode.Disposable {
       );
       let added = 0;
       for (const j of jobs) {
+        if (!isJobId(j.jobId)) {
+          this.output.appendLine(`[jobs] import: skipped a job with an unexpected ID ${JSON.stringify(j.jobId)}`);
+          continue;
+        }
         const access = j.own ? "own" : "foreign";
         const existing = this.store.get(target.project, j.jobId, target.instance);
         if (existing) {
