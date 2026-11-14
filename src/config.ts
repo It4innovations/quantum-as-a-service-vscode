@@ -2,9 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as vscode from "vscode";
-import { type LexisInstance, normalizeInstance, parseDotenv } from "./core/devEnv";
-
-export const TOKEN_KEY = "qaas.lexisToken";
+import { type LexisInstance, normalizeInstance, parseDotenv, sameInstance, tokenKey } from "./core/devEnv";
 
 export function cfg(): vscode.WorkspaceConfiguration {
   return vscode.workspace.getConfiguration("qaas");
@@ -48,19 +46,38 @@ export function lexisProject(dev = devOverrides()): string {
   return dev.QAAS_LEXIS_PROJECT || cfg().get<string>("lexisProject") || "";
 }
 
-/** Token from the dev file, then secret storage, then the QAAS_LEXIS_TOKEN environment variable. */
-export async function lexisToken(secrets: vscode.SecretStorage, dev = devOverrides()): Promise<string | undefined> {
-  return dev.QAAS_LEXIS_TOKEN || (await secrets.get(TOKEN_KEY)) || process.env.QAAS_LEXIS_TOKEN || undefined;
+/**
+ * Token for a LEXIS instance (default: the current one). A token is only ever returned for the
+ * instance it belongs to, so a workspace or dev file that points at another server cannot make
+ * the extension send it there:
+ * - the dev file's token, when the dev file selects this instance;
+ * - the token stored in secret storage for this instance (stored per instance);
+ * - the QAAS_LEXIS_TOKEN environment variable, for production only.
+ */
+export async function lexisToken(
+  secrets: vscode.SecretStorage,
+  instance: LexisInstance | undefined = lexisInstance(),
+  dev = devOverrides(),
+): Promise<string | undefined> {
+  if (dev.QAAS_LEXIS_TOKEN && sameInstance(instance, lexisInstance(dev))) {
+    return dev.QAAS_LEXIS_TOKEN;
+  }
+  const stored = await secrets.get(tokenKey(instance));
+  if (stored) {
+    return stored;
+  }
+  return normalizeInstance(instance ?? {}) ? undefined : process.env.QAAS_LEXIS_TOKEN || undefined;
 }
 
 export async function currentTarget(secrets: vscode.SecretStorage): Promise<Target> {
   const dev = devOverrides();
+  const instance = lexisInstance(dev);
   return {
     project: lexisProject(dev),
     resource: dev.QAAS_LEXIS_RESOURCE || cfg().get<string>("lexisResource") || "",
     backend: dev.QAAS_BACKEND_NAME || cfg().get<string>("backendName") || "VLQ",
-    token: await lexisToken(secrets, dev),
-    instance: lexisInstance(dev),
+    token: await lexisToken(secrets, instance, dev),
+    instance,
   };
 }
 

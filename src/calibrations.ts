@@ -9,6 +9,7 @@ import * as vscode from "vscode";
 import type { Bridge } from "./bridge";
 import { currentTarget, lexisInstance, type Target } from "./config";
 import { buildTable, type CalibrationMetrics, calibrationCsv } from "./core/calibration";
+import { nonce as makeNonce } from "./core/nonce";
 import type { JobStore } from "./jobs";
 import type { OperatorCatalog } from "./operators";
 import { ensureReady } from "./session";
@@ -368,7 +369,7 @@ class CalibrationPanel {
   private html(): string {
     const webview = this.panel.webview;
     const script = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "media", "calibration.js"));
-    const nonce = Array.from({ length: 24 }, () => Math.floor(Math.random() * 36).toString(36)).join("");
+    const nonce = makeNonce();
     return `<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}' ${webview.cspSource};">

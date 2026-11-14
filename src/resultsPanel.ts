@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { nonce as makeNonce } from "./core/nonce";
 import {
   type CountStats,
   type Counts,
@@ -101,7 +102,7 @@ export class ResultsPanel {
   }
 
   private render(): void {
-    const nonce = Array.from({ length: 24 }, () => Math.floor(Math.random() * 36).toString(36)).join("");
+    const nonce = makeNonce();
     const j = this.job;
     const ref = this.reference;
     const sections = this.counts.map((c, i) => this.circuitSection(c, i, ref?.counts[i])).join("");

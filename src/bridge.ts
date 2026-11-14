@@ -2,7 +2,9 @@ import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import type { Target } from "./config";
+import { PRODUCTION_AAI_URL } from "./core/devEnv";
 import { resolvePython } from "./python";
+import { trustedLoginInstance } from "./trust";
 
 export class BridgeError extends Error {
   constructor(
@@ -21,6 +23,7 @@ interface Pending {
 /** Methods that need a LEXIS login. */
 const AUTH_METHODS = new Set([
   "whoami",
+  "accessToken",
   "backends",
   "backendInfo",
   "analyze",
@@ -56,6 +59,8 @@ export class Bridge implements vscode.Disposable {
   constructor(
     private readonly extensionPath: string,
     private readonly output: vscode.OutputChannel,
+    /** py4lexis log file; under the extension's per-user log folder, not the shared temp dir. */
+    private readonly lexisLog?: string,
   ) {}
 
   async request<T>(method: string, params: object = {}, token?: vscode.CancellationToken): Promise<T> {
@@ -78,8 +83,17 @@ export class Bridge implements vscode.Disposable {
     return value;
   }
 
-  /** Request with the LEXIS target merged into the params. */
-  call<T>(method: string, target: Target, params: object = {}, token?: vscode.CancellationToken): Promise<T> {
+  /**
+   * Request with the LEXIS target merged into the params. A browser login (no token) on a
+   * non-production instance chosen by the workspace or dev file needs the user's approval first.
+   */
+  async call<T>(method: string, target: Target, params: object = {}, token?: vscode.CancellationToken): Promise<T> {
+    if (AUTH_METHODS.has(method) && !target.token && !(await trustedLoginInstance(target.instance))) {
+      throw new BridgeError(
+        `Login to ${target.instance?.aaiUrl ?? "this LEXIS instance"} was not allowed. Remove or fix the instance URLs in the workspace settings or dev connection file.`,
+        "LoginDeclined",
+      );
+    }
     return this.request<T>(method, { ...target, ...params }, token);
   }
 
@@ -119,7 +133,11 @@ export class Bridge implements vscode.Disposable {
     const python = await resolvePython();
     const script = path.join(this.extensionPath, "python", "qaas_bridge.py");
     this.output.appendLine(`[bridge] starting ${python} ${script} serve`);
-    const proc = spawn(python, [script, "serve"], { env: { ...process.env, PYTHONUNBUFFERED: "1" } });
+    const env: NodeJS.ProcessEnv = { ...process.env, PYTHONUNBUFFERED: "1" };
+    if (this.lexisLog) {
+      env.QAAS_LEXIS_LOG = this.lexisLog;
+    }
+    const proc = spawn(python, [script, "serve"], { env });
     this.proc = proc;
     this.stdoutBuf = "";
     this.stderrBuf = "";
@@ -184,8 +202,20 @@ export class Bridge implements vscode.Disposable {
     const m = /Open provided url in your browser[^:]*:\s*(https?:\/\/\S+)/.exec(chunk);
     if (m) {
       const url = m[1];
+      let host = url;
+      try {
+        host = new URL(url).host;
+      } catch {
+        // show the raw URL
+      }
+      const production = host === new URL(PRODUCTION_AAI_URL).host;
       vscode.window
-        .showInformationMessage("QaaS: finish the LEXIS login in your browser.", "Open Login Page")
+        .showInformationMessage(
+          production
+            ? `QaaS: finish the LEXIS login in your browser (${host}).`
+            : `QaaS: finish the LEXIS login in your browser. The login page is on ${host}, not the LEXIS production login (${new URL(PRODUCTION_AAI_URL).host}).`,
+          "Open Login Page",
+        )
         .then((choice) => {
           if (choice) {
             vscode.env.openExternal(vscode.Uri.parse(url));

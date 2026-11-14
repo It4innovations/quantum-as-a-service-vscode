@@ -5,8 +5,8 @@
 
 import * as vscode from "vscode";
 import type { Bridge } from "./bridge";
-import { currentTarget, devEnvPath, devOverrides, lexisInstance, lexisToken, TOKEN_KEY } from "./config";
-import { instanceLabel } from "./core/devEnv";
+import { currentTarget, devEnvPath, devOverrides, lexisInstance, lexisToken } from "./config";
+import { instanceLabel, PRODUCTION_AAI_URL, sameInstance, tokenKey } from "./core/devEnv";
 import { createEnvironment, installQaas, selectInterpreter } from "./environments";
 
 export interface CheckData {
@@ -153,31 +153,52 @@ export async function signIn(
     return false;
   }
   if (pick.choice === "token") {
-    const token = await vscode.window.showInputBox({
-      title: `${name} token`,
-      prompt: "Refresh/offline token (recommended) or access token",
-      password: true,
-      ignoreFocusOut: true,
-      validateInput: (v) =>
-        v
-          .trim()
-          .replace(/^["']|["']$/g, "")
-          .split(".").length === 3
-          ? undefined
-          : "Expected a JWT (three dot-separated parts)",
-    });
-    if (!token) {
-      return false;
-    }
-    if (devOverrides().QAAS_LEXIS_TOKEN) {
-      vscode.window.showWarningMessage(
-        `QaaS: ${devEnvPath()} sets QAAS_LEXIS_TOKEN, which takes precedence over the pasted token.`,
-      );
-    }
-    await secrets.store(TOKEN_KEY, token.trim().replace(/^["']|["']$/g, ""));
-    bridge.restart();
+    return pasteToken(bridge, secrets, output);
   }
-  return verifySignIn(bridge, secrets, output, pick.choice === "token");
+  return verifySignIn(bridge, secrets, output, false);
+}
+
+/**
+ * Ask for a refresh/access token, store it for the current LEXIS instance only, and verify it.
+ * The prompt names the server the token goes to, since a workspace or dev file can change it.
+ */
+export async function pasteToken(
+  bridge: Bridge,
+  secrets: vscode.SecretStorage,
+  output: vscode.OutputChannel,
+): Promise<boolean> {
+  const name = lexisName();
+  const instance = lexisInstance();
+  const server = instance?.aaiUrl ?? instance?.apiUrl ?? PRODUCTION_AAI_URL;
+  const token = await vscode.window.showInputBox({
+    title: `${name} token`,
+    prompt: instance
+      ? `Refresh/offline token (recommended) or access token. It will be sent to ${server} (non-production instance from ${
+          devOverrides().PY4LEXIS_AAI_URL || devOverrides().PY4LEXIS_API_URL ? devEnvPath() : "settings"
+        }) and used only there.`
+      : `Refresh/offline token (recommended) or access token for LEXIS production (${server}).`,
+    password: true,
+    ignoreFocusOut: true,
+    validateInput: (v) =>
+      v
+        .trim()
+        .replace(/^["']|["']$/g, "")
+        .split(".").length === 3
+        ? undefined
+        : "Expected a JWT (three dot-separated parts)",
+  });
+  if (!token) {
+    return false;
+  }
+  const dev = devOverrides();
+  if (dev.QAAS_LEXIS_TOKEN && sameInstance(instance, lexisInstance(dev))) {
+    vscode.window.showWarningMessage(
+      `QaaS: ${devEnvPath()} sets QAAS_LEXIS_TOKEN, which takes precedence over the pasted token.`,
+    );
+  }
+  await secrets.store(tokenKey(instance), token.trim().replace(/^["']|["']$/g, ""));
+  bridge.restart();
+  return verifySignIn(bridge, secrets, output, true);
 }
 
 async function verifySignIn(
@@ -202,7 +223,7 @@ async function verifySignIn(
   } catch (e) {
     output.appendLine(`[session] sign-in failed: ${(e as Error).message}`);
     if (pastedToken) {
-      await secrets.delete(TOKEN_KEY);
+      await secrets.delete(tokenKey(lexisInstance()));
     }
     vscode.window.showErrorMessage(`QaaS: sign-in to ${name} failed: ${(e as Error).message}`);
     return false;

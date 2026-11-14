@@ -2,17 +2,8 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 import { Bridge } from "./bridge";
 import { CalibrationCommands, CalibrationStore, CalibrationsTreeProvider } from "./calibrations";
-import {
-  cfg,
-  currentTarget,
-  devEnvPath,
-  devOverrides,
-  lexisInstance,
-  requireProject,
-  TOKEN_KEY,
-  targetEnv,
-} from "./config";
-import { devEnvTemplate, instanceLabel } from "./core/devEnv";
+import { cfg, currentTarget, devEnvPath, devOverrides, lexisInstance, requireProject, targetEnv } from "./config";
+import { devEnvTemplate, instanceFromTokenKey, instanceLabel, type LexisInstance } from "./core/devEnv";
 import { estimate, formatRange, formatSeconds } from "./core/estimate";
 import { createEnvironment, installQaas, selectInterpreter } from "./environments";
 import { detectCalls, EstimateCodeLensProvider, PYTHON_SELECTOR, QASM_SELECTOR } from "./estimateLens";
@@ -31,7 +22,8 @@ import {
 import { OperatorCatalog, OperatorCommands, type OperatorNode, OperatorsTreeProvider } from "./operators";
 import { resolvePython } from "./python";
 import { QasmCommands, TRANSPILED_SCHEME, TranspiledContentProvider } from "./qasm";
-import { ensureEnvironment, ensureReady, lexisName, signIn, type WhoAmI } from "./session";
+import { ensureEnvironment, ensureReady, lexisName, pasteToken, signIn, type WhoAmI } from "./session";
+import { initTrust } from "./trust";
 import { WaveformEditor } from "./waveformEditor";
 
 interface BackendInfo {
@@ -103,8 +95,13 @@ async function newFromTemplate(context: vscode.ExtensionContext, file: string, l
   await vscode.window.showTextDocument(doc);
 }
 
-/** Run a Python file in a terminal with LEXIS settings in the environment; confirm with the cost estimate. */
-async function runPythonFile(context: vscode.ExtensionContext, uri?: vscode.Uri): Promise<void> {
+/** Run a Python file in a terminal with LEXIS settings and an access token in the environment; confirm with the cost estimate. */
+interface AccessToken {
+  token: string;
+  expiresAt?: string | null;
+}
+
+async function runPythonFile(context: vscode.ExtensionContext, bridge: Bridge, uri?: vscode.Uri): Promise<void> {
   const doc = uri ? await vscode.workspace.openTextDocument(uri) : vscode.window.activeTextEditor?.document;
   if (!doc || doc.languageId !== "python") {
     vscode.window.showWarningMessage("QaaS: open a Python file to run.");
@@ -137,8 +134,27 @@ async function runPythonFile(context: vscode.ExtensionContext, uri?: vscode.Uri)
       return;
     }
   }
+  if (!(await ensureReady(bridge, context.secrets, output))) {
+    return;
+  }
+  // The script gets a short-lived access token from the bridge, never the stored refresh token:
+  // anything started in this terminal can read its environment.
   const t = await currentTarget(context.secrets);
-  const env = targetEnv(t);
+  let access: AccessToken;
+  try {
+    access = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: "QaaS: getting a LEXIS access token…",
+        cancellable: true,
+      },
+      (_p, token) => bridge.call<AccessToken>("accessToken", t, {}, token),
+    );
+  } catch (e) {
+    vscode.window.showErrorMessage(`QaaS: could not get a LEXIS access token: ${(e as Error).message}`);
+    return;
+  }
+  const env = targetEnv({ ...t, token: access.token });
   const terminal = vscode.window.createTerminal({ name: "QaaS run", env });
   terminal.show();
   const python = await resolvePython();
@@ -146,7 +162,11 @@ async function runPythonFile(context: vscode.ExtensionContext, uri?: vscode.Uri)
   terminal.sendText(`${process.platform === "win32" ? "& " : ""}${q(python)} ${q(doc.uri.fsPath)}`);
   vscode.window
     .showInformationMessage(
-      "QaaS: jobs submitted by the script appear in the Jobs view after an import.",
+      `QaaS: jobs submitted by the script appear in the Jobs view after an import.${
+        access.expiresAt
+          ? ` Its LEXIS access token is valid until ${new Date(access.expiresAt).toLocaleTimeString()}.`
+          : ""
+      }`,
       "Import Jobs",
     )
     .then((c) => c && vscode.commands.executeCommand("qaas.jobs.import"));
@@ -163,6 +183,103 @@ function updateStatusBar(item: vscode.StatusBarItem): void {
   const where = instance ? `LEXIS ${instance.apiUrl ?? instance.aaiUrl}` : "LEXIS production";
   const fromFile = Object.keys(dev).length > 0 ? ` (overrides from ${path.basename(devEnvPath())})` : "";
   item.tooltip = `QaaS: ${where}, project ${project || "not set"}${fromFile}. Click to choose a backend.`;
+}
+
+interface LogoutResult {
+  revoked: number;
+  skipped: number;
+  failed: string[];
+}
+
+/**
+ * Revoke the refresh tokens on the LEXIS server (stored tokens of every instance and this
+ * session's logins), then forget them locally. Local logout happens even if revoking fails.
+ * Tokens from the dev file and the environment are revoked only when the user asks, since
+ * other tools often share them.
+ */
+async function logOut(context: vscode.ExtensionContext, bridge: Bridge): Promise<void> {
+  const tokens: { token: string; instance?: LexisInstance }[] = [];
+  const keys: string[] = [];
+  for (const key of await context.secrets.keys()) {
+    const instance = instanceFromTokenKey(key);
+    if (instance === null) {
+      continue;
+    }
+    keys.push(key);
+    const token = await context.secrets.get(key);
+    if (token) {
+      tokens.push({ token, instance });
+    }
+  }
+  const external = devOverrides().QAAS_LEXIS_TOKEN
+    ? { token: devOverrides().QAAS_LEXIS_TOKEN, instance: lexisInstance(), where: devEnvPath() }
+    : process.env.QAAS_LEXIS_TOKEN
+      ? { token: process.env.QAAS_LEXIS_TOKEN, instance: undefined, where: "the QAAS_LEXIS_TOKEN environment variable" }
+      : undefined;
+  let revokeExternal = false;
+  if (external) {
+    const choice = await vscode.window.showWarningMessage(
+      `QaaS: ${external.where} also sets a LEXIS token. Revoke it on the server too?`,
+      {
+        modal: true,
+        detail:
+          "Revoking ends that token everywhere, including notebooks and scripts that use it. Otherwise it keeps working after this logout.",
+      },
+      "Revoke It Too",
+      "Keep It",
+    );
+    if (choice === undefined) {
+      return;
+    }
+    revokeExternal = choice === "Revoke It Too";
+    if (revokeExternal) {
+      tokens.push({ token: external.token, instance: external.instance });
+    }
+  }
+
+  let result: LogoutResult | undefined;
+  let error: string | undefined;
+  try {
+    result = await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: "QaaS: revoking LEXIS tokens…" },
+      () =>
+        Promise.race([
+          bridge.request<LogoutResult>("logout", { tokens }),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timed out")), 20_000)),
+        ]),
+    );
+  } catch (e) {
+    error = (e as Error).message;
+  }
+  await Promise.all(keys.map((k) => context.secrets.delete(k)));
+  bridge.restart();
+
+  for (const f of result?.failed ?? []) {
+    output.appendLine(`[session] could not revoke a token on ${f}`);
+  }
+  const parts = ["QaaS: logged out."];
+  if (error) {
+    parts.push(`Tokens were removed from VS Code but could not be revoked on the server (${error}).`);
+  } else if (result) {
+    parts.push(`${result.revoked} refresh token${result.revoked === 1 ? "" : "s"} revoked on the server.`);
+    if (result.skipped) {
+      parts.push(
+        `${result.skipped} access token${result.skipped === 1 ? "" : "s"} cannot be revoked and expire on their own.`,
+      );
+    }
+    if (result.failed.length) {
+      parts.push(`${result.failed.length} could not be revoked (see the QaaS output).`);
+    }
+  }
+  if (external && !revokeExternal) {
+    parts.push(`${external.where} still sets a token.`);
+  }
+  const message = parts.join(" ");
+  if (error || result?.failed.length) {
+    vscode.window.showWarningMessage(message);
+  } else {
+    vscode.window.showInformationMessage(message);
+  }
 }
 
 /** Log in to the current LEXIS instance and list backends, reporting each step in the output channel. */
@@ -310,7 +427,8 @@ async function openDevConnectionFile(): Promise<void> {
 
 export function activate(context: vscode.ExtensionContext): void {
   output = vscode.window.createOutputChannel("QaaS");
-  const bridge = new Bridge(context.extensionPath, output);
+  initTrust(context.globalState);
+  const bridge = new Bridge(context.extensionPath, output, path.join(context.logUri.fsPath, "lexis.log"));
   const store = new JobStore(context.globalState);
   const jobs = new JobManager(store, bridge, context.secrets, output);
   const tree = new JobsTreeProvider(store);
@@ -410,30 +528,14 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("qaas.restartBridge", () => bridge.restart()),
     vscode.commands.registerCommand("qaas.openDevConnection", () => openDevConnectionFile()),
     vscode.commands.registerCommand("qaas.testConnection", () => testConnection(context, bridge)),
-    vscode.commands.registerCommand("qaas.setToken", async () => {
-      const token = await vscode.window.showInputBox({
-        title: "LEXIS refresh or access token",
-        prompt:
-          "Stored in VS Code secret storage. A refresh/offline token is renewed automatically; an access token expires in minutes. Leave unset to log in through the browser.",
-        password: true,
-        ignoreFocusOut: true,
-      });
-      if (token) {
-        await context.secrets.store(TOKEN_KEY, token);
-        vscode.window.showInformationMessage("QaaS: LEXIS token saved.");
-      }
-    }),
-    vscode.commands.registerCommand("qaas.clearToken", async () => {
-      await context.secrets.delete(TOKEN_KEY);
-      bridge.restart();
-      vscode.window.showInformationMessage("QaaS: LEXIS token cleared and session closed.");
-    }),
+    vscode.commands.registerCommand("qaas.setToken", () => pasteToken(bridge, context.secrets, output)),
+    vscode.commands.registerCommand("qaas.clearToken", () => logOut(context, bridge)),
     vscode.commands.registerCommand("qaas.listBackends", () => listBackends(context, bridge)),
 
     // circuits
     vscode.commands.registerCommand("qaas.newCircuitFile", () => newFromTemplate(context, "vlq_circuit.py", "python")),
     vscode.commands.registerCommand("qaas.newQasmFile", () => newFromTemplate(context, "bell.qasm", "openqasm")),
-    vscode.commands.registerCommand("qaas.runCurrentFile", (uri?: vscode.Uri) => runPythonFile(context, uri)),
+    vscode.commands.registerCommand("qaas.runCurrentFile", (uri?: vscode.Uri) => runPythonFile(context, bridge, uri)),
     vscode.commands.registerCommand("qaas.runQasm", (uri?: vscode.Uri, uris?: vscode.Uri[]) => qasm.run(uri, uris)),
     vscode.commands.registerCommand("qaas.transpileQasm", (uri?: vscode.Uri) => qasm.transpile(uri)),
     vscode.commands.registerCommand("qaas.runQasmWithOperator", (uri?: vscode.Uri) => qasm.runWithOperator(uri)),
