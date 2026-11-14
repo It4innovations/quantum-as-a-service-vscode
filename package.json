@@ -3,9 +3,10 @@
   "displayName": "Quantum-as-a-Service (QHEAppE)",
   "description": "Run OpenQASM 3 and Qiskit circuits on the VLQ quantum computer through LEXIS and HEAppE: job manager, result downloads, billed-time estimates. AI tools were used to help implement this extension.",
   "version": "0.0.1",
-  "publisher": "it4innovations",
+  "publisher": "quantum-as-a-service-vscode",
   "author": {
-    "name": "Ing. Jan Swiatkowski"
+    "name": "IT4Innovations National Supercomputing Center, VSB - Technical University of Ostrava",
+    "url": "https://www.it4i.cz"
   },
   "contributors": [
     {
