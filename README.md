@@ -306,6 +306,9 @@ extensions and formats on save.
 
 ## Authors
 
+Developed at [IT4Innovations National Supercomputing Center](https://www.it4i.cz),
+VSB - Technical University of Ostrava.
+
 - Ing. Jan Swiatkowski
 - Ing. Jan Martinovič, Ph.D.
 
