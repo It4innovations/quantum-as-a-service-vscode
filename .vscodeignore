@@ -16,3 +16,5 @@ qaas-results/**
 .qaas/**
 lexis_logs.log
 .ruff_cache/**
+python/tests/**
+.github/**

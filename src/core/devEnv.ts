@@ -68,6 +68,46 @@ export function normalizeInstance(i: LexisInstance): LexisInstance | undefined {
   return out.aaiUrl || out.apiUrl || out.realm ? out : undefined;
 }
 
+/** Same LEXIS instance (undefined and empty fields mean production). */
+export function sameInstance(a?: LexisInstance, b?: LexisInstance): boolean {
+  const x = normalizeInstance(a ?? {});
+  const y = normalizeInstance(b ?? {});
+  return (
+    (x?.aaiUrl ?? "") === (y?.aaiUrl ?? "") &&
+    (x?.apiUrl ?? "") === (y?.apiUrl ?? "") &&
+    (x?.realm ?? "") === (y?.realm ?? "")
+  );
+}
+
+/** Secret-storage key of the production token; tokens of other instances use it as a prefix. */
+export const TOKEN_KEY = "qaas.lexisToken";
+
+/**
+ * Secret-storage key of the token for a LEXIS instance. Production keeps the original key;
+ * any other instance gets its own key, so its token is never sent to a different server.
+ */
+export function tokenKey(instance?: LexisInstance): string {
+  const i = normalizeInstance(instance ?? {});
+  return i ? `${TOKEN_KEY}@${i.aaiUrl ?? ""}|${i.apiUrl ?? ""}|${i.realm ?? ""}` : TOKEN_KEY;
+}
+
+/** Instance of a key made by tokenKey; undefined for production, null for keys that are not token keys. */
+export function instanceFromTokenKey(key: string): LexisInstance | undefined | null {
+  if (key === TOKEN_KEY) {
+    return undefined;
+  }
+  if (!key.startsWith(`${TOKEN_KEY}@`)) {
+    return null;
+  }
+  const [aaiUrl, apiUrl, realm] = key.slice(TOKEN_KEY.length + 1).split("|");
+  return normalizeInstance({ aaiUrl, apiUrl, realm });
+}
+
+/** HEAppE job IDs are integers; anything else from the server is rejected before it reaches a path. */
+export function isJobId(id: unknown): id is string {
+  return typeof id === "string" && /^\d{1,19}$/.test(id);
+}
+
 /** Short label for a non-production instance, e.g. "staging" for api.staging.example.org. */
 export function instanceLabel(i?: LexisInstance): string | undefined {
   if (!i) {
