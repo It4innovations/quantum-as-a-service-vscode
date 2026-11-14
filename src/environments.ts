@@ -5,6 +5,7 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 import { cfg } from "./config";
 import { resolvePython } from "./python";
+import { approveExecutable, trustedSetting } from "./trust";
 
 /** qaas supports exactly this Python minor version (requires-python >=3.12,<3.13). */
 export const REQUIRED_PYTHON = "3.12";
@@ -58,7 +59,7 @@ function run(cmd: string, args: string[], timeoutMs = 8000): Promise<string | un
 
 /** conda executable: CONDA_EXE, qaas.condaPath, common install locations, then PATH. */
 export async function findConda(): Promise<string | undefined> {
-  const configured = cfg().get<string>("condaPath");
+  const configured = await trustedSetting("condaPath");
   const bin = isWin ? path.join("Scripts", "conda.exe") : path.join("bin", "conda");
   const candidates = [
     configured,
@@ -224,6 +225,10 @@ async function setInterpreter(python: string): Promise<void> {
   const target = vscode.workspace.workspaceFolders?.length
     ? vscode.ConfigurationTarget.Workspace
     : vscode.ConfigurationTarget.Global;
+  if (target === vscode.ConfigurationTarget.Workspace) {
+    // before the update: the bridge restarts on the change and must not ask about the user's own pick
+    await approveExecutable("pythonPath", python);
+  }
   await cfg().update("pythonPath", python, target);
 }
 

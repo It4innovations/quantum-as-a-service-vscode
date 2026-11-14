@@ -2,6 +2,7 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 import { cfg } from "./config";
 import { estimate, formatRange, formatSeconds, VLQ_BILLING } from "./core/estimate";
+import { nonce as makeNonce } from "./core/nonce";
 import { describeCall, detectCalls, isQasm } from "./estimateLens";
 
 export interface EstimatorPreset {
@@ -118,7 +119,7 @@ export class EstimatorViewProvider implements vscode.WebviewViewProvider, vscode
   }
 
   private html(): string {
-    const nonce = Array.from({ length: 24 }, () => Math.floor(Math.random() * 36).toString(36)).join("");
+    const nonce = makeNonce();
     const consts = JSON.stringify(VLQ_BILLING);
     return `<!doctype html><html><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">

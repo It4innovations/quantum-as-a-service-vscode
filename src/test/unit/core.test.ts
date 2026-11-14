@@ -1,6 +1,7 @@
 import * as assert from "node:assert/strict";
 import { test } from "node:test";
 import { estimate, formatRange } from "../../core/estimate";
+import { nonce } from "../../core/nonce";
 import { scanRunCalls } from "../../core/runScanner";
 
 const close = (a: number, b: number) => assert.ok(Math.abs(a - b) < 1e-9, `${a} != ${b}`);
@@ -126,4 +127,12 @@ test("analysis notebook is valid nbformat and includes optional sections on dema
   const full = JSON.parse(buildAnalysisNotebook({ ...base, hasShots: true, hasCircuits: true }));
   const all = full.cells.map((c: { source: string }) => c.source).join("\n");
   assert.ok(all.includes("shots.csv") && all.includes("hellinger_fidelity"));
+});
+
+test("webview nonces are random base64 of 128 bits", () => {
+  const seen = new Set(Array.from({ length: 100 }, () => nonce()));
+  assert.equal(seen.size, 100);
+  for (const n of seen) {
+    assert.match(n, /^[A-Za-z0-9+/]{22}==$/);
+  }
 });

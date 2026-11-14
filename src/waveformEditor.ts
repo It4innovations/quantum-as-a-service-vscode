@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import type { Bridge } from "./bridge";
 import { cfg } from "./config";
+import { nonce as makeNonce } from "./core/nonce";
 import {
   entryStatus,
   type LocusValues,
@@ -219,7 +220,7 @@ export class WaveformEditor {
   }
 
   private html(): string {
-    const nonce = Array.from({ length: 24 }, () => Math.floor(Math.random() * 36).toString(36)).join("");
+    const nonce = makeNonce();
     return `<!doctype html><html><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
 <style>

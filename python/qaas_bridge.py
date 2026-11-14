@@ -298,6 +298,39 @@ def _instance(p: dict) -> tuple[str | None, str | None, str | None]:
 LEXIS_LOG = Path(os.environ.get("QAAS_LEXIS_LOG") or Path(tempfile.gettempdir()) / "qaas-vscode-lexis.log")
 
 
+def _private_log(path: Path) -> Path:
+    """Create the py4lexis log readable by the user only, refusing a planted symlink.
+
+    py4lexis opens it with logging.basicConfig (default permissions, follows symlinks); creating
+    it first means basicConfig appends to this file and its 0600 mode is kept.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        os.fchmod(fd, 0o600)  # also tightens a log created by an older version
+    except (AttributeError, OSError):  # Windows has no fchmod; ACLs apply there
+        pass
+    finally:
+        os.close(fd)
+    return path
+
+
+def _new_session(token: str | None, aai: str | None, api: str | None, realm: str | None):
+    from py4lexis.session import LexisSession
+
+    kwargs: dict[str, Any] = {
+        "aai_url": aai,
+        "api_url": api,
+        "realm": realm,
+        "log_file": str(_private_log(LEXIS_LOG)),
+        "reraise_exceptions": True,
+        "suppress_welcome": True,
+    }
+    if token:
+        kwargs.update(login_method="token", refresh_token=token)
+    return LexisSession(**kwargs)
+
+
 class Server:
     def __init__(self) -> None:
         self._sessions: dict[tuple, Any] = {}
@@ -319,19 +352,7 @@ class Server:
         key = (token, aai, api, realm)
         session = self._sessions.get(key)
         if session is None:
-            from py4lexis.session import LexisSession
-
-            kwargs: dict[str, Any] = {
-                "aai_url": aai,
-                "api_url": api,
-                "realm": realm,
-                "log_file": str(LEXIS_LOG),
-                "reraise_exceptions": True,
-                "suppress_welcome": True,
-            }
-            if token:
-                kwargs.update(login_method="token", refresh_token=token)
-            session = LexisSession(**kwargs)
+            session = _new_session(token, aai, api, realm)
             self._sessions[key] = session
         access = session.get_access_token()
         old = self._issued.get(key)
@@ -339,6 +360,38 @@ class Server:
             self._forget(old)
         self._issued[key] = access
         return access
+
+    def logout(self, p: dict) -> dict:
+        """Revoke refresh tokens on the server: every session of this process (including browser
+        logins) and the tokens passed in (`tokens`: [{token, instance}]). Access tokens cannot be
+        revoked and expire on their own. Local state is cleared even when revoking fails."""
+        revoked, skipped, failed = 0, 0, []
+        done: set[str] = set()
+        for (token, aai, _api, _realm), session in list(self._sessions.items()):
+            try:
+                session.logout()
+                revoked += 1
+                if token:
+                    done.add(token)
+            except Exception as exc:
+                failed.append(f"{aai or 'production'}: {exc}")
+        for t in p.get("tokens") or []:
+            token = t.get("token")
+            if not token or token in done:
+                continue
+            if token_kind(token) == "access":
+                skipped += 1
+                continue
+            aai, api, realm = _instance(t)
+            try:
+                _new_session(token, aai, api, realm).logout()
+                revoked += 1
+                done.add(token)
+            except Exception as exc:
+                failed.append(f"{aai or 'production'}: {exc}")
+        for cache in (self._sessions, self._issued, self._providers, self._backends, self._pullas):
+            cache.clear()
+        return {"revoked": revoked, "skipped": skipped, "failed": failed}
 
     def _forget(self, access_token: str) -> None:
         """Drop clients built with an access token that has been renewed."""
@@ -383,6 +436,13 @@ class Server:
             except NotImplementedError as exc:
                 raise BridgeError(str(exc)) from exc
         return self._pullas[key]
+
+    def accessToken(self, p: dict) -> dict:
+        """Short-lived access token for a script started from VS Code. Never the refresh token:
+        the script's environment is readable by everything it starts."""
+        access = self._access_token(p)
+        exp = _jwt_claims(access).get("exp")
+        return {"token": access, "expiresAt": datetime.fromtimestamp(exp, UTC).isoformat() if exp else None}
 
     def whoami(self, p: dict) -> dict:
         """Log in (if needed) and describe the connection, without touching HEAppE."""
