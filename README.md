@@ -234,7 +234,8 @@ for budgeting). Submission latency of 3–15 s is not billed.
 
 Scripts started with **Run Python File on VLQ** get `LEXIS_PROJECT`, `LEXIS_RESOURCE`,
 `QAAS_BACKEND`, `LEXIS_TOKEN` and, for a non-production instance, `PY4LEXIS_AAI_URL`,
-`PY4LEXIS_API_URL` and `PY4LEXIS_REALM` as environment variables. `LEXIS_TOKEN` is always a
+`PY4LEXIS_API_URL` and `PY4LEXIS_REALM` as environment variables (those that are set; with
+`qaas.workflowsService` set to `efp`, only `PY4LEXIS_API_URL`). `LEXIS_TOKEN` is always a
 short-lived **access token** issued by the bridge (also after a browser login), never the stored
 refresh token, because everything started in that terminal can read it. Scripts that still need
 LEXIS after it expires (usually minutes; the expiry is shown when the script starts) must be run
@@ -255,7 +256,11 @@ instead of its own py4lexis login. Turn on `qaas.workflowsIntegration` (IT4I Wor
 - py4lexis is never imported; it does not have to be installed. The bridge refuses any token that is not an access
   token instead of starting a py4lexis login.
 - Sign out in IT4I Workflows. `Set LEXIS Token` and `Open Dev Connection File` are hidden in this mode. `Log Out of LEXIS` stays: it revokes the tokens QaaS stored itself before (py4lexis sign-in).
-- `Run Python File on VLQ` still passes an access token as `LEXIS_TOKEN` to the script.
+- The status bar tooltip adds "(signed in through IT4I Workflows)". With `qaas.workflowsService` set to `efp`, the
+  status bar shows `VLQ · LEXIS workflows` on a warning background; the label comes from the server's host name,
+  as with `LEXIS test`.
+- `Run Python File on VLQ` still passes an access token as `LEXIS_TOKEN` to the script. With `efp`, which counts as a
+  non-production instance, the script also gets `PY4LEXIS_API_URL=https://api.workflows.my-eurohpc.eu`.
 - The Rabi calibration notebook signs in only with `LEXIS_TOKEN` set in the kernel's environment; without it, it
   falls back to the py4lexis login. Turn `qaas.workflowsIntegration` off for calibration notebooks.
 
