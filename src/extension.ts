@@ -5,6 +5,7 @@ import { CalibrationCommands, CalibrationStore, CalibrationsTreeProvider } from 
 import { cfg, currentTarget, devEnvPath, devOverrides, lexisInstance, requireProject, targetEnv } from "./config";
 import { devEnvTemplate, instanceFromTokenKey, instanceLabel, type LexisInstance } from "./core/devEnv";
 import { estimate, formatRange, formatSeconds } from "./core/estimate";
+import { signInChanged } from "./core/workflowsAuth";
 import { createEnvironment, installQaas, selectInterpreter } from "./environments";
 import { detectCalls, EstimateCodeLensProvider, PYTHON_SELECTOR, QASM_SELECTOR } from "./estimateLens";
 import { type EstimatorPreset, EstimatorViewProvider } from "./estimatorView";
@@ -25,8 +26,13 @@ import { QasmCommands, TRANSPILED_SCHEME, TranspiledContentProvider } from "./qa
 import { ensureEnvironment, ensureReady, lexisName, pasteToken, signIn, type WhoAmI } from "./session";
 import { initTrust } from "./trust";
 import { WaveformEditor } from "./waveformEditor";
-import { signInChanged } from "./core/workflowsAuth";
-import { currentAuthMode, currentService, forgetWorkflowsSettings, invalidateWorkflowsToken, watchWorkflows } from "./workflows";
+import {
+  currentAuthMode,
+  currentService,
+  forgetWorkflowsSettings,
+  invalidateWorkflowsToken,
+  watchWorkflows,
+} from "./workflows";
 
 interface BackendInfo {
   name: string;
@@ -105,7 +111,7 @@ interface AccessToken {
 
 async function runPythonFile(context: vscode.ExtensionContext, bridge: Bridge, uri?: vscode.Uri): Promise<void> {
   const doc = uri ? await vscode.workspace.openTextDocument(uri) : vscode.window.activeTextEditor?.document;
-  if (!doc || doc.languageId !== "python") {
+  if (doc?.languageId !== "python") {
     vscode.window.showWarningMessage("QaaS: open a Python file to run.");
     return;
   }
@@ -226,10 +232,14 @@ async function logOut(context: vscode.ExtensionContext, bridge: Bridge): Promise
   const external = workflows
     ? undefined
     : devOverrides().QAAS_LEXIS_TOKEN
-    ? { token: devOverrides().QAAS_LEXIS_TOKEN, instance: lexisInstance(), where: devEnvPath() }
-    : process.env.QAAS_LEXIS_TOKEN
-      ? { token: process.env.QAAS_LEXIS_TOKEN, instance: undefined, where: "the QAAS_LEXIS_TOKEN environment variable" }
-      : undefined;
+      ? { token: devOverrides().QAAS_LEXIS_TOKEN, instance: lexisInstance(), where: devEnvPath() }
+      : process.env.QAAS_LEXIS_TOKEN
+        ? {
+            token: process.env.QAAS_LEXIS_TOKEN,
+            instance: undefined,
+            where: "the QAAS_LEXIS_TOKEN environment variable",
+          }
+        : undefined;
   let revokeExternal = false;
   if (external) {
     const choice = await vscode.window.showWarningMessage(

@@ -2,7 +2,7 @@
   "name": "qaas-vscode",
   "displayName": "Quantum-as-a-Service (QHEAppE)",
   "description": "Run OpenQASM 3 and Qiskit circuits on the VLQ quantum computer through LEXIS and HEAppE: job manager, result downloads, billed-time estimates. AI tools were used to help implement this extension.",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "publisher": "quantum-as-a-service-vscode",
   "author": {
     "name": "IT4Innovations National Supercomputing Center, VSB - Technical University of Ostrava",
@@ -920,16 +920,16 @@
     "test:py": "python -m unittest discover -s python/tests"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.2.4",
+    "@biomejs/biome": "2.6.8",
     "@types/mocha": "^10.0.10",
     "@types/node": "^22.10.0",
     "@types/vscode": "^1.95.0",
     "@vscode/test-cli": "^0.0.15",
     "@vscode/test-electron": "^3.1.0",
-    "@vscode/vsce": "^3.2.2",
-    "typescript": "^5.7.2"
+    "@vscode/vsce": "^4.1.1",
+    "typescript": "7.0.2"
   },
   "dependencies": {
-    "yaml": "2.8.4"
+    "yaml": "2.9.1"
   }
 }
