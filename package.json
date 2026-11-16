@@ -397,10 +397,6 @@
           "when": "qaas.authMode != workflows"
         },
         {
-          "command": "qaas.clearToken",
-          "when": "qaas.authMode != workflows"
-        },
-        {
           "command": "qaas.openDevConnection",
           "when": "qaas.authMode != workflows"
         },
@@ -568,7 +564,7 @@
         },
         {
           "command": "qaas.clearToken",
-          "when": "view == qaas.jobs && qaas.authMode != workflows",
+          "when": "view == qaas.jobs",
           "group": "9_connection@1"
         },
         {
