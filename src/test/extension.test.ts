@@ -1,4 +1,6 @@
 import * as assert from "node:assert";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import * as vscode from "vscode";
 
 suite("QaaS extension", () => {
@@ -13,8 +15,9 @@ suite("QaaS extension", () => {
     }
   });
 
-  test("without IT4I Workflows the settings it writes are removed", async () => {
+  test("without IT4I Workflows the user settings it writes are removed, workspace settings stay", async () => {
     const settings = () => vscode.workspace.getConfiguration("qaas");
+    await settings().update("workflowsIntegration", true, vscode.ConfigurationTarget.Workspace);
     await settings().update("workflowsService", "efp", vscode.ConfigurationTarget.Global);
     await settings().update("workflowsIntegration", true, vscode.ConfigurationTarget.Global);
     for (let i = 0; i < 50 && settings().inspect("workflowsIntegration")?.globalValue !== undefined; i++) {
@@ -22,6 +25,12 @@ suite("QaaS extension", () => {
     }
     assert.strictEqual(settings().inspect("workflowsIntegration")?.globalValue, undefined);
     assert.strictEqual(settings().inspect("workflowsService")?.globalValue, undefined);
+    assert.strictEqual(settings().inspect("workflowsIntegration")?.workspaceValue, true);
+    await settings().update("workflowsIntegration", undefined, vscode.ConfigurationTarget.Workspace);
+    const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (folder) {
+      fs.rmSync(path.join(folder, ".vscode"), { recursive: true, force: true });
+    }
   });
 
   test("shows billed-time estimates above qaas run calls", async () => {

@@ -202,12 +202,9 @@ interface LogoutResult {
  * other tools often share them.
  */
 async function logOut(context: vscode.ExtensionContext, bridge: Bridge): Promise<void> {
-  if (currentAuthMode() === "workflows") {
-    vscode.window.showInformationMessage(
-      "QaaS uses the IT4I Workflows sign-in (setting qaas.workflowsIntegration is on). Sign out in IT4I Workflows.",
-    );
-    return;
-  }
+  const workflows = currentAuthMode() === "workflows";
+  const workflowsNote =
+    "QaaS uses the IT4I Workflows sign-in (setting qaas.workflowsIntegration is on). Sign out in IT4I Workflows.";
   const tokens: { token: string; instance?: LexisInstance }[] = [];
   const keys: string[] = [];
   for (const key of await context.secrets.keys()) {
@@ -221,7 +218,14 @@ async function logOut(context: vscode.ExtensionContext, bridge: Bridge): Promise
       tokens.push({ token, instance });
     }
   }
-  const external = devOverrides().QAAS_LEXIS_TOKEN
+  if (workflows && keys.length === 0) {
+    vscode.window.showInformationMessage(workflowsNote);
+    return;
+  }
+  // In workflows mode only QaaS's own stored tokens are revoked; the dev file and environment are not used.
+  const external = workflows
+    ? undefined
+    : devOverrides().QAAS_LEXIS_TOKEN
     ? { token: devOverrides().QAAS_LEXIS_TOKEN, instance: lexisInstance(), where: devEnvPath() }
     : process.env.QAAS_LEXIS_TOKEN
       ? { token: process.env.QAAS_LEXIS_TOKEN, instance: undefined, where: "the QAAS_LEXIS_TOKEN environment variable" }
@@ -283,6 +287,9 @@ async function logOut(context: vscode.ExtensionContext, bridge: Bridge): Promise
   }
   if (external && !revokeExternal) {
     parts.push(`${external.where} still sets a token.`);
+  }
+  if (workflows) {
+    parts.push(workflowsNote);
   }
   const message = parts.join(" ");
   if (error || result?.failed.length) {

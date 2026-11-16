@@ -48,11 +48,10 @@ async function forgetSettings(): Promise<void> {
   const settings = vscode.workspace.getConfiguration("qaas");
   for (const key of ["workflowsIntegration", "workflowsService"]) {
     const value = settings.inspect(key);
+    // Workspace settings may be committed in a repository: they are left alone, and without
+    // IT4I Workflows the mode falls back to py4lexis anyway.
     if (value?.globalValue !== undefined) {
       await settings.update(key, undefined, vscode.ConfigurationTarget.Global);
-    }
-    if (value?.workspaceValue !== undefined) {
-      await settings.update(key, undefined, vscode.ConfigurationTarget.Workspace);
     }
   }
 }

@@ -243,7 +243,7 @@ again.
 ## Sign in through IT4I Workflows
 
 With the IT4I Workflows extension (`lexis-platform.lexis-platform`) installed, QaaS can use its sign-in
-instead of its own py4lexis login. Turn on `qaas.workflowsIntegration` (IT4I Workflows turns it on in the workspace settings when you open QaaS from it, then runs Synchronize). The jobs view then offers only Synchronize, not the py4lexis sign-in. Without IT4I Workflows installed and enabled (for example after uninstalling it) QaaS removes `qaas.workflowsIntegration` and `qaas.workflowsService` from the user settings and the open workspace, and signs in on its own.
+instead of its own py4lexis login. Turn on `qaas.workflowsIntegration` (IT4I Workflows turns it on in the workspace settings when you open QaaS from it, then runs Synchronize). The jobs view then offers only Synchronize, not the py4lexis sign-in. Without IT4I Workflows installed and enabled (for example after uninstalling it) QaaS signs in on its own and removes `qaas.workflowsIntegration` and `qaas.workflowsService` from the user settings (workspace settings stay, as they may be committed in a repository).
 
 - IT4I Workflows signs in once; its `lexis` CLI keeps the session in the system keyring. QaaS stores no token.
 - QaaS asks IT4I Workflows for a short-lived **access token** for every use and keeps it in memory only, until 30 s
@@ -254,7 +254,7 @@ instead of its own py4lexis login. Turn on `qaas.workflowsIntegration` (IT4I Wor
   LEXIS test instance needs `qaas.workflowsIntegration` off.
 - py4lexis is never imported; it does not have to be installed. The bridge refuses any token that is not an access
   token instead of starting a py4lexis login.
-- Sign out in IT4I Workflows. `Set LEXIS Token`, `Log Out of LEXIS` and `Open Dev Connection File` are hidden in this mode.
+- Sign out in IT4I Workflows. `Set LEXIS Token` and `Open Dev Connection File` are hidden in this mode. `Log Out of LEXIS` stays: it revokes the tokens QaaS stored itself before (py4lexis sign-in).
 - `Run Python File on VLQ` still passes an access token as `LEXIS_TOKEN` to the script.
 - The Rabi calibration notebook signs in only with `LEXIS_TOKEN` set in the kernel's environment; without it, it
   falls back to the py4lexis login. Turn `qaas.workflowsIntegration` off for calibration notebooks.
