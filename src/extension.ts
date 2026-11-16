@@ -25,6 +25,8 @@ import { QasmCommands, TRANSPILED_SCHEME, TranspiledContentProvider } from "./qa
 import { ensureEnvironment, ensureReady, lexisName, pasteToken, signIn, type WhoAmI } from "./session";
 import { initTrust } from "./trust";
 import { WaveformEditor } from "./waveformEditor";
+import { signInChanged } from "./core/workflowsAuth";
+import { currentAuthMode, currentService, forgetWorkflowsSettings, invalidateWorkflowsToken, watchWorkflows } from "./workflows";
 
 interface BackendInfo {
   name: string;
@@ -180,7 +182,9 @@ function updateStatusBar(item: vscode.StatusBarItem): void {
   const label = instanceLabel(instance);
   item.text = `$(pulse) ${backend}${label ? ` · LEXIS ${label}` : ""}`;
   item.backgroundColor = label ? new vscode.ThemeColor("statusBarItem.warningBackground") : undefined;
-  const where = instance ? `LEXIS ${instance.apiUrl ?? instance.aaiUrl}` : "LEXIS production";
+  const where = `${instance ? `LEXIS ${instance.apiUrl ?? instance.aaiUrl}` : "LEXIS production"}${
+    currentAuthMode() === "workflows" ? " (signed in through IT4I Workflows)" : ""
+  }`;
   const fromFile = Object.keys(dev).length > 0 ? ` (overrides from ${path.basename(devEnvPath())})` : "";
   item.tooltip = `QaaS: ${where}, project ${project || "not set"}${fromFile}. Click to choose a backend.`;
 }
@@ -198,6 +202,12 @@ interface LogoutResult {
  * other tools often share them.
  */
 async function logOut(context: vscode.ExtensionContext, bridge: Bridge): Promise<void> {
+  if (currentAuthMode() === "workflows") {
+    vscode.window.showInformationMessage(
+      "QaaS uses the IT4I Workflows sign-in (setting qaas.workflowsIntegration is on). Sign out in IT4I Workflows.",
+    );
+    return;
+  }
   const tokens: { token: string; instance?: LexisInstance }[] = [];
   const keys: string[] = [];
   for (const key of await context.secrets.keys()) {
@@ -459,7 +469,33 @@ export function activate(context: vscode.ExtensionContext): void {
   store.onDidChange(updateBadge);
   updateBadge();
 
+  const setAuthContext = () => vscode.commands.executeCommand("setContext", "qaas.authMode", currentAuthMode());
+  void setAuthContext();
+  let signedInWith = { mode: currentAuthMode(), service: currentService() };
+  void forgetWorkflowsSettings();
+  // The IT4I Workflows sign-in changed: drop clients built with the old token and re-check jobs.
+  const workflows = watchWorkflows(() => {
+    bridge.restart();
+    void jobs.poll(false);
+    void jobs.checkAccess();
+  });
+
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 50);
+  /** Settings or extensions changed: when the sign-in changed, drop clients and tokens of the old one. */
+  const authChanged = () => {
+    const now = { mode: currentAuthMode(), service: currentService() };
+    const changed = signInChanged(signedInWith, now);
+    signedInWith = now;
+    void setAuthContext();
+    updateStatusBar(status);
+    if (!changed) {
+      return;
+    }
+    invalidateWorkflowsToken();
+    bridge.restart();
+    workflows.refresh();
+    void catalog.loadCachedInfo();
+  };
   status.command = "qaas.listBackends";
   updateStatusBar(status);
   status.show();
@@ -485,6 +521,7 @@ export function activate(context: vscode.ExtensionContext): void {
     jobsView,
     estimator,
     status,
+    workflows,
     vscode.window.registerWebviewViewProvider(EstimatorViewProvider.viewId, estimator),
     vscode.window.createTreeView("qaas.calibrations", { treeDataProvider: calibrationTree }),
     vscode.window.registerFileDecorationProvider(new JobDecorationProvider(store)),
@@ -500,6 +537,10 @@ export function activate(context: vscode.ExtensionContext): void {
       if (e.affectsConfiguration("qaas.pythonPath")) {
         bridge.restart();
       }
+      if (e.affectsConfiguration("qaas.workflowsIntegration") || e.affectsConfiguration("qaas.workflowsService")) {
+        authChanged();
+        void forgetWorkflowsSettings();
+      }
       if (["qaas.lexisProject", "qaas.lexisResource", "qaas.backendName"].some((k) => e.affectsConfiguration(k))) {
         void catalog.loadCachedInfo();
       }
@@ -510,6 +551,11 @@ export function activate(context: vscode.ExtensionContext): void {
         lens.refresh();
         updateStatusBar(status);
       }
+    }),
+    // Removing IT4I Workflows removes its settings; installing it switches the mode while qaas.workflowsIntegration is on.
+    vscode.extensions.onDidChange(() => {
+      void forgetWorkflowsSettings();
+      authChanged();
     }),
     devWatcher,
     devWatcher.onDidCreate(onDevChange),
@@ -526,7 +572,13 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("qaas.selectInterpreter", () => selectInterpreter()),
     vscode.commands.registerCommand("qaas.createEnvironment", () => createEnvironment()),
     vscode.commands.registerCommand("qaas.restartBridge", () => bridge.restart()),
-    vscode.commands.registerCommand("qaas.openDevConnection", () => openDevConnectionFile()),
+    vscode.commands.registerCommand("qaas.openDevConnection", () =>
+      currentAuthMode() === "workflows"
+        ? vscode.window.showInformationMessage(
+            "QaaS signs in through IT4I Workflows (setting qaas.workflowsIntegration is on); the dev connection file's LEXIS URLs and token are not used in this mode.",
+          )
+        : openDevConnectionFile(),
+    ),
     vscode.commands.registerCommand("qaas.testConnection", () => testConnection(context, bridge)),
     vscode.commands.registerCommand("qaas.setToken", () => pasteToken(bridge, context.secrets, output)),
     vscode.commands.registerCommand("qaas.clearToken", () => logOut(context, bridge)),

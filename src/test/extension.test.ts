@@ -13,6 +13,17 @@ suite("QaaS extension", () => {
     }
   });
 
+  test("without IT4I Workflows the settings it writes are removed", async () => {
+    const settings = () => vscode.workspace.getConfiguration("qaas");
+    await settings().update("workflowsService", "efp", vscode.ConfigurationTarget.Global);
+    await settings().update("workflowsIntegration", true, vscode.ConfigurationTarget.Global);
+    for (let i = 0; i < 50 && settings().inspect("workflowsIntegration")?.globalValue !== undefined; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.strictEqual(settings().inspect("workflowsIntegration")?.globalValue, undefined);
+    assert.strictEqual(settings().inspect("workflowsService")?.globalValue, undefined);
+  });
+
   test("shows billed-time estimates above qaas run calls", async () => {
     const doc = await vscode.workspace.openTextDocument({
       language: "python",

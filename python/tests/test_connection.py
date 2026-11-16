@@ -112,6 +112,39 @@ class ConnectionTests(unittest.TestCase):
         self.assertEqual(me["tokenKind"], "login")
         self.assertEqual(me["apiUrl"], "https://api.staging.example.org")
 
+    def test_workflows_mode_uses_the_given_access_token_and_never_signs_in_with_py4lexis(self):
+        # None in sys.modules makes any import of py4lexis fail.
+        sys.modules["py4lexis"] = None
+        sys.modules["py4lexis.session"] = None
+        server = qaas_bridge.Server()
+        access = jwt(typ="Bearer", preferred_username="tester")
+        p = {
+            "project": "p",
+            "token": access,
+            "auth": "workflows",
+            "instance": {"apiUrl": "https://api.efp.example.org/"},
+        }
+        provider = server._provider(p)
+        self.assertEqual(provider.token, access)
+        self.assertEqual(provider.kwargs, {"lexis_api_url": "https://api.efp.example.org"})
+        self.assertEqual(server.whoami(p)["tokenKind"], "access")
+        for token in (None, jwt(typ="Refresh")):
+            with self.assertRaises(qaas_bridge.SignInRequired):
+                server._provider({**p, "token": token})
+        self.assertEqual(FakeSession.instances, [])
+
+    def test_check_leaves_out_py4lexis_in_workflows_mode(self):
+        self.assertIn("py4lexis", qaas_bridge.Server().check({})["packages"])
+        self.assertNotIn("py4lexis", qaas_bridge.Server().check({"auth": "workflows"})["packages"])
+
+    def test_workflows_mode_drops_clients_of_the_previous_token(self):
+        server = qaas_bridge.Server()
+        p = {"project": "p", "auth": "workflows", "instance": {"apiUrl": "https://api.efp.example.org/"}}
+        first = server._provider({**p, "token": jwt(typ="Bearer", n=1)})
+        second = server._provider({**p, "token": jwt(typ="Bearer", n=2)})
+        self.assertIsNot(first, second)
+        self.assertEqual(list(server._providers.values()), [second])
+
     def test_missing_project(self):
         with self.assertRaises(qaas_bridge.BridgeError):
             qaas_bridge.Server()._provider({"token": jwt(typ="Bearer")})
