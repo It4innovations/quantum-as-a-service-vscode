@@ -2,10 +2,10 @@ import * as assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   authMode,
-  signInChanged,
   EXPIRY_MARGIN_MS,
   errorCode,
   serviceInstance,
+  signInChanged,
   TokenCache,
   tokenMatchesService,
   type WorkflowsAccessToken,

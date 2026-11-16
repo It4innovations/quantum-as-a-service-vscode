@@ -92,7 +92,10 @@ export class Bridge implements vscode.Disposable {
     if (currentAuthMode() === "workflows") {
       // Never fall back to a py4lexis login: the bridge refuses any token that is not an access token.
       if (AUTH_METHODS.has(method) && !target.token) {
-        throw new BridgeError("Sign in with IT4I Workflows first (setting qaas.workflowsIntegration is on).", "SignInRequired");
+        throw new BridgeError(
+          "Sign in with IT4I Workflows first (setting qaas.workflowsIntegration is on).",
+          "SignInRequired",
+        );
       }
       return this.request<T>(method, { ...target, auth: "workflows", ...params }, token);
     }
