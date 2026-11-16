@@ -5,6 +5,7 @@ import type { Target } from "./config";
 import { PRODUCTION_AAI_URL } from "./core/devEnv";
 import { resolvePython } from "./python";
 import { trustedLoginInstance } from "./trust";
+import { currentAuthMode } from "./workflows";
 
 export class BridgeError extends Error {
   constructor(
@@ -88,6 +89,13 @@ export class Bridge implements vscode.Disposable {
    * non-production instance chosen by the workspace or dev file needs the user's approval first.
    */
   async call<T>(method: string, target: Target, params: object = {}, token?: vscode.CancellationToken): Promise<T> {
+    if (currentAuthMode() === "workflows") {
+      // Never fall back to a py4lexis login: the bridge refuses any token that is not an access token.
+      if (AUTH_METHODS.has(method) && !target.token) {
+        throw new BridgeError("Sign in with IT4I Workflows first (setting qaas.workflowsIntegration is on).", "SignInRequired");
+      }
+      return this.request<T>(method, { ...target, auth: "workflows", ...params }, token);
+    }
     if (AUTH_METHODS.has(method) && !target.token && !(await trustedLoginInstance(target.instance))) {
       throw new BridgeError(
         `Login to ${target.instance?.aaiUrl ?? "this LEXIS instance"} was not allowed. Remove or fix the instance URLs in the workspace settings or dev connection file.`,

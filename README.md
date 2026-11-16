@@ -22,7 +22,8 @@ Status: ✅ available and tested (live items verified on VLQ, 2026-11-11) · �
 | Feature | Status | Notes |
 | --- | --- | --- |
 | **Synchronize with LEXIS Platform**: sign in, check the backend, import jobs from HEAppE, refresh active jobs and the calibration set | 🔶 | Jobs view title bar and welcome screen. Each step is verified on VLQ; the combined flow is new |
-| Sign-in prompt before any LEXIS command when not signed in: browser login, paste a refresh/access token, or a dev connection file | 🔶 | `QaaS: Sign in to LEXIS…` switches account or method |
+| Sign-in prompt before any LEXIS command when not signed in: browser login, paste a refresh/access token, or a dev connection file | 🔶 | `QaaS: Sign in to LEXIS…` switches account or method. In `workflows` mode it shows the IT4I Workflows sign-in instead |
+| Sign in through the IT4I Workflows extension (`qaas.workflowsIntegration` on), without py4lexis | 🔶 | See [Sign in through IT4I Workflows](#sign-in-through-it4i-workflows). Not yet verified against live VLQ |
 | LEXIS browser login, kept for the whole VS Code session | 🔶 | The login URL is also offered as a notification (works on remote hosts) |
 | LEXIS token in VS Code secret storage | ✅ | `QaaS: Set LEXIS Token` / `Log Out of LEXIS` (also in the Jobs view's ⋯ menu). A refresh/offline token is renewed automatically; an access token is used as is. Tokens are stored per LEXIS instance and only sent to that instance. Log out revokes the refresh tokens on the server (stored ones and this session's browser logins) and clears them; a token in the dev file or `QAAS_LEXIS_TOKEN` is revoked only if you confirm, since other tools may share it. Verified with both on production and the test instance |
 | Other LEXIS instances (test instance) via settings or a git-ignored dev connection file | ✅ | See [Testing against the LEXIS test instance](#testing-against-the-lexis-test-instance). Status bar shows `LEXIS test`; jobs remember their instance |
@@ -210,6 +211,8 @@ for budgeting). Submission latency of 3–15 s is not billed.
 | `qaas.pythonPath` | *(empty)* | Python 3.12 with qaas. Empty uses the Python extension's selection, then `python3`. A value from workspace settings is used only after you allow it once (interpreters picked with **Select Python Interpreter** are allowed automatically); the same applies to `qaas.condaPath` |
 | `qaas.condaPath` | *(empty)* | `conda` executable when it is not found automatically |
 | `qaas.packageExtra` | `iqm_qiskit` | IQM extra installed with qaas |
+| `qaas.workflowsIntegration` | `false` | `true`: sign in through the IT4I Workflows extension instead of py4lexis (see below) |
+| `qaas.workflowsService` | `core` | IT4I Workflows service used in `workflows` mode: `core` (LEXIS production) or `efp` (EFP Workflows) |
 | `qaas.lexisProject` | *(empty)* | LEXIS project identifier |
 | `qaas.lexisResource` | *(empty)* | LEXIS resource; empty lets the client choose |
 | `qaas.backendName` | `VLQ` | Backend name |
@@ -236,6 +239,25 @@ short-lived **access token** issued by the bridge (also after a browser login), 
 refresh token, because everything started in that terminal can read it. Scripts that still need
 LEXIS after it expires (usually minutes; the expiry is shown when the script starts) must be run
 again.
+
+## Sign in through IT4I Workflows
+
+With the IT4I Workflows extension (`lexis-platform.lexis-platform`) installed, QaaS can use its sign-in
+instead of its own py4lexis login. Turn on `qaas.workflowsIntegration` (IT4I Workflows turns it on in the workspace settings when you open QaaS from it, then runs Synchronize). The jobs view then offers only Synchronize, not the py4lexis sign-in. Without IT4I Workflows installed and enabled (for example after uninstalling it) QaaS removes `qaas.workflowsIntegration` and `qaas.workflowsService` from the user settings and the open workspace, and signs in on its own.
+
+- IT4I Workflows signs in once; its `lexis` CLI keeps the session in the system keyring. QaaS stores no token.
+- QaaS asks IT4I Workflows for a short-lived **access token** for every use and keeps it in memory only, until 30 s
+  before it expires. The refresh token never leaves the `lexis` CLI.
+- The token is used only for the instance of `qaas.workflowsService` (`core`: `https://api.lexis.tech`, `efp`:
+  `https://api.workflows.my-eurohpc.eu`); a token for another instance is refused. `qaas.lexisAaiUrl`,
+  `qaas.lexisApiUrl`, `qaas.lexisRealm` and the dev connection file's URLs and token are not used in this mode, so the
+  LEXIS test instance needs `qaas.workflowsIntegration` off.
+- py4lexis is never imported; it does not have to be installed. The bridge refuses any token that is not an access
+  token instead of starting a py4lexis login.
+- Sign out in IT4I Workflows. `Set LEXIS Token`, `Log Out of LEXIS` and `Open Dev Connection File` are hidden in this mode.
+- `Run Python File on VLQ` still passes an access token as `LEXIS_TOKEN` to the script.
+- The Rabi calibration notebook signs in only with `LEXIS_TOKEN` set in the kernel's environment; without it, it
+  falls back to the py4lexis login. Turn `qaas.workflowsIntegration` off for calibration notebooks.
 
 ## Testing against the LEXIS test instance
 
