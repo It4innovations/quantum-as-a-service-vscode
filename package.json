@@ -85,7 +85,13 @@
       },
       {
         "view": "qaas.jobs",
-        "contents": "No jobs yet. Synchronize to sign in to the LEXIS Platform and import your jobs from HEAppE.\n[$(sync) Synchronize with LEXIS Platform](command:qaas.sync)\nSign in with the browser or a refresh/access token. [Sign in to LEXIS…](command:qaas.signIn)\nOr run an OpenQASM file: [New OpenQASM 3 File](command:qaas.newQasmFile)"
+        "contents": "No jobs yet. Synchronize to sign in to the LEXIS Platform and import your jobs from HEAppE.\n[$(sync) Synchronize with LEXIS Platform](command:qaas.sync)\nSign in with the browser or a refresh/access token. [Sign in to LEXIS…](command:qaas.signIn)\nOr run an OpenQASM file: [New OpenQASM 3 File](command:qaas.newQasmFile)",
+        "when": "qaas.authMode != workflows"
+      },
+      {
+        "view": "qaas.jobs",
+        "contents": "No jobs yet. QaaS uses your IT4I Workflows sign-in. Synchronize to import your jobs from HEAppE.\n[$(sync) Synchronize with LEXIS Platform](command:qaas.sync)\nOr run an OpenQASM file: [New OpenQASM 3 File](command:qaas.newQasmFile)",
+        "when": "qaas.authMode == workflows"
       },
       {
         "view": "qaas.calibrations",
@@ -386,6 +392,14 @@
     ],
     "menus": {
       "commandPalette": [
+        {
+          "command": "qaas.setToken",
+          "when": "qaas.authMode != workflows"
+        },
+        {
+          "command": "qaas.openDevConnection",
+          "when": "qaas.authMode != workflows"
+        },
         {
           "command": "qaas.jobs.showResults",
           "when": "false"
@@ -750,6 +764,24 @@
           ],
           "default": "iqm_qiskit",
           "description": "IQM extra installed with qaas (see the qaas compatibility table)."
+        },
+        "qaas.workflowsIntegration": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Sign in through the [IT4I Workflows](command:workbench.extensions.search?%22%40id%3Alexis-platform.lexis-platform%22) extension instead of py4lexis. QaaS then asks it for a short-lived access token for every use and keeps it in memory only. The LEXIS URL settings and the dev connection file's URLs and token are not used while this is on. IT4I Workflows turns it on in the workspace settings when you open QaaS from it."
+        },
+        "qaas.workflowsService": {
+          "type": "string",
+          "enum": [
+            "core",
+            "efp"
+          ],
+          "enumDescriptions": [
+            "IT4I Workflows (LEXIS production, https://api.lexis.tech).",
+            "EFP Workflows (https://api.workflows.my-eurohpc.eu)."
+          ],
+          "default": "core",
+          "markdownDescription": "Which IT4I Workflows sign-in QaaS uses when `#qaas.workflowsIntegration#` is on."
         },
         "qaas.lexisProject": {
           "type": "string",

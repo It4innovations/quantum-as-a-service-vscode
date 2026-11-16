@@ -3,6 +3,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { type LexisInstance, normalizeInstance, parseDotenv, sameInstance, tokenKey } from "./core/devEnv";
+import { serviceInstance } from "./core/workflowsAuth";
+import { currentAuthMode, currentService, workflowsToken } from "./workflows";
 
 export function cfg(): vscode.WorkspaceConfiguration {
   return vscode.workspace.getConfiguration("qaas");
@@ -33,8 +35,15 @@ export function devOverrides(): Record<string, string> {
   }
 }
 
-/** LEXIS instance from the dev file, then settings; undefined for production. */
+/**
+ * LEXIS instance from the dev file, then settings; undefined for production. In workflows mode
+ * the instance of the IT4I Workflows service (`qaas.workflowsService`); URLs from the dev file and
+ * settings are not used.
+ */
 export function lexisInstance(dev = devOverrides()): LexisInstance | undefined {
+  if (currentAuthMode() === "workflows") {
+    return serviceInstance(currentService());
+  }
   return normalizeInstance({
     aaiUrl: dev.PY4LEXIS_AAI_URL || cfg().get<string>("lexisAaiUrl"),
     apiUrl: dev.PY4LEXIS_API_URL || cfg().get<string>("lexisApiUrl"),
@@ -53,12 +62,17 @@ export function lexisProject(dev = devOverrides()): string {
  * - the dev file's token, when the dev file selects this instance;
  * - the token stored in secret storage for this instance (stored per instance);
  * - the QAAS_LEXIS_TOKEN environment variable, for production only.
+ * In workflows mode only the IT4I Workflows access token, and only for its own instance.
  */
 export async function lexisToken(
   secrets: vscode.SecretStorage,
   instance: LexisInstance | undefined = lexisInstance(),
   dev = devOverrides(),
 ): Promise<string | undefined> {
+  if (currentAuthMode() === "workflows") {
+    const t = await workflowsToken();
+    return t && sameInstance(instance, serviceInstance(t.service)) ? t.token : undefined;
+  }
   if (dev.QAAS_LEXIS_TOKEN && sameInstance(instance, lexisInstance(dev))) {
     return dev.QAAS_LEXIS_TOKEN;
   }

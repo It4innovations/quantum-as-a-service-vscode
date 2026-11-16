@@ -42,6 +42,12 @@ class BridgeError(Exception):
     kind = "BridgeError"
 
 
+class SignInRequired(BridgeError):
+    """workflows mode without an access token from IT4I Workflows."""
+
+    kind = "SignInRequired"
+
+
 class EnvironmentProblem(BridgeError):
     """The interpreter cannot run qaas (wrong Python version or missing packages)."""
 
@@ -347,7 +353,17 @@ class Server:
         browser login go through a py4lexis session that renews the access token when it expires."""
         token = p.get("token") or None
         if token_kind(token) == "access":
+            if p.get("auth") == "workflows":
+                # A new token from IT4I Workflows every few minutes: drop the clients built with the old one.
+                key = ("workflows", *_instance(p))
+                old = self._issued.get(key)
+                if old and old != token:
+                    self._forget(old)
+                self._issued[key] = token
             return token
+        if p.get("auth") == "workflows":
+            # The sign-in belongs to IT4I Workflows; py4lexis is never used in this mode.
+            raise SignInRequired("Sign in with IT4I Workflows first (setting qaas.workflowsIntegration is on).")
         aai, api, realm = _instance(p)
         key = (token, aai, api, realm)
         session = self._sessions.get(key)
@@ -475,19 +491,11 @@ class Server:
 
     # --- methods ----------------------------------------------------------
 
-    def check(self, _: dict) -> dict:
-        packages = {
-            name: _version(name)
-            for name in (
-                "qaas",
-                "qiskit",
-                "qiskit-qasm3-import",
-                "iqm-client",
-                "iqm-pulla",
-                "py4lexis",
-                "Py4HEAppE",
-            )
-        }
+    def check(self, p: dict) -> dict:
+        names = ["qaas", "qiskit", "qiskit-qasm3-import", "iqm-client", "iqm-pulla", "py4lexis", "Py4HEAppE"]
+        if p.get("auth") == "workflows":
+            names.remove("py4lexis")  # not used: IT4I Workflows signs in
+        packages = {name: _version(name) for name in names}
         data = {
             "pythonOk": sys.version_info >= MIN_PYTHON,
             "python": sys.version.split()[0],

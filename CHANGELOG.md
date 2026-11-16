@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Sign in through the IT4I Workflows extension: `qaas.workflowsIntegration` (off by default, then QaaS signs in with py4lexis as before) takes a short-lived access token from the IT4I Workflows API for every use, keeps it in memory only and never imports py4lexis; `qaas.workflowsService` picks IT4I Workflows (`core`) or EFP Workflows (`efp`).
 - Long-running Python bridge: one LEXIS login per session.
 - Job manager: jobs view, persistence across restarts, background refresh, import from HEAppE, cancel, notifications.
 - Result downloads to a configurable path or a chosen folder.
