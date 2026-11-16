@@ -8,6 +8,7 @@ import type { Bridge } from "./bridge";
 import { currentTarget, devEnvPath, devOverrides, lexisInstance, lexisToken } from "./config";
 import { instanceLabel, PRODUCTION_AAI_URL, sameInstance, tokenKey } from "./core/devEnv";
 import { createEnvironment, installQaas, selectInterpreter } from "./environments";
+import { currentAuthMode, signInWithWorkflows } from "./workflows";
 
 export interface CheckData {
   pythonOk?: boolean;
@@ -75,7 +76,7 @@ export async function ensureEnvironment(
   }
   let d: CheckData;
   try {
-    d = await bridge.request<CheckData>("check");
+    d = await bridge.request<CheckData>("check", currentAuthMode() === "workflows" ? { auth: "workflows" } : {});
   } catch (e) {
     output.appendLine(`[environment] check failed: ${(e as Error).message}`);
     await offerFix(`QaaS: could not run Python (${(e as Error).message}).`);
@@ -116,6 +117,9 @@ export async function signIn(
 ): Promise<boolean> {
   if (!(await ensureEnvironment(bridge, output))) {
     return false;
+  }
+  if (currentAuthMode() === "workflows") {
+    return signInThroughWorkflows(bridge, secrets, output);
   }
   const name = lexisName();
   const items: (vscode.QuickPickItem & { choice: SignInChoice })[] = [
@@ -167,6 +171,12 @@ export async function pasteToken(
   secrets: vscode.SecretStorage,
   output: vscode.OutputChannel,
 ): Promise<boolean> {
+  if (currentAuthMode() === "workflows") {
+    vscode.window.showInformationMessage(
+      "QaaS signs in through IT4I Workflows (setting qaas.workflowsIntegration is on); tokens are not pasted in this mode.",
+    );
+    return false;
+  }
   const name = lexisName();
   const instance = lexisInstance();
   const server = instance?.aaiUrl ?? instance?.apiUrl ?? PRODUCTION_AAI_URL;
@@ -199,6 +209,35 @@ export async function pasteToken(
   await secrets.store(tokenKey(instance), token.trim().replace(/^["']|["']$/g, ""));
   bridge.restart();
   return verifySignIn(bridge, secrets, output, true);
+}
+
+/** Sign in with IT4I Workflows, then check the connection with its access token. */
+async function signInThroughWorkflows(
+  bridge: Bridge,
+  secrets: vscode.SecretStorage,
+  output: vscode.OutputChannel,
+): Promise<boolean> {
+  if (!(await signInWithWorkflows())) {
+    return false;
+  }
+  const name = lexisName();
+  try {
+    const me = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: `QaaS: checking the IT4I Workflows sign-in to ${name}…`,
+        cancellable: true,
+      },
+      async (_p, token) => bridge.call<WhoAmI>("whoami", await currentTarget(secrets), {}, token),
+    );
+    output.appendLine(`[session] using the IT4I Workflows sign-in to ${name} as ${me.user ?? "?"}`);
+    vscode.window.showInformationMessage(`QaaS: signed in to ${name} as ${me.user ?? "?"} through IT4I Workflows.`);
+    return true;
+  } catch (e) {
+    output.appendLine(`[session] IT4I Workflows sign-in check failed: ${(e as Error).message}`);
+    vscode.window.showErrorMessage(`QaaS: the IT4I Workflows sign-in did not work: ${(e as Error).message}`);
+    return false;
+  }
 }
 
 async function verifySignIn(
@@ -238,6 +277,10 @@ export async function ensureReady(
 ): Promise<boolean> {
   if (!(await ensureEnvironment(bridge, output))) {
     return false;
+  }
+  if (currentAuthMode() === "workflows") {
+    // A bridge login does not count here: the token comes from IT4I Workflows for every use.
+    return (await lexisToken(secrets)) ? true : signIn(bridge, secrets, output);
   }
   if (bridge.authenticated || (await lexisToken(secrets))) {
     return true;
