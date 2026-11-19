@@ -54,7 +54,19 @@ class EnvironmentProblem(BridgeError):
     kind = "Environment"
 
 
+# Running in Pyodide (the extension's WebAssembly runtime): py4lexis is only a placeholder there.
+WASM = sys.platform == "emscripten"
 QAAS_MODULES = ("qheappe_client", "qaas", "qiskit", "iqm", "py4lexis", "py4heappe")
+
+
+def _pyodide_label() -> str:
+    """Name of the WebAssembly runtime, used where the interpreter path is shown."""
+    try:
+        import pyodide
+
+        return f"Pyodide {pyodide.__version__} (WebAssembly, bundled with the extension)"
+    except Exception:
+        return "Pyodide (WebAssembly, bundled with the extension)"
 
 
 def _environment_problem() -> EnvironmentProblem | None:
@@ -364,6 +376,12 @@ class Server:
         if p.get("auth") == "workflows":
             # The sign-in belongs to IT4I Workflows; py4lexis is never used in this mode.
             raise SignInRequired("Sign in with IT4I Workflows first (setting qaas.workflowsIntegration is on).")
+        if WASM:
+            raise SignInRequired(
+                "The WebAssembly runtime (setting qaas.runtime) has no py4lexis, so it cannot log in with the "
+                "browser or renew a refresh token. Sign in through IT4I Workflows, paste an access token, "
+                "or set qaas.runtime to python."
+            )
         aai, api, realm = _instance(p)
         key = (token, aai, api, realm)
         session = self._sessions.get(key)
@@ -399,6 +417,9 @@ class Server:
                 skipped += 1
                 continue
             aai, api, realm = _instance(t)
+            if WASM:
+                failed.append(f"{aai or 'production'}: revoking a refresh token needs qaas.runtime set to python")
+                continue
             try:
                 _new_session(token, aai, api, realm).logout()
                 revoked += 1
@@ -493,13 +514,14 @@ class Server:
 
     def check(self, p: dict) -> dict:
         names = ["qaas", "qiskit", "qiskit-qasm3-import", "iqm-client", "iqm-pulla", "py4lexis", "Py4HEAppE"]
-        if p.get("auth") == "workflows":
-            names.remove("py4lexis")  # not used: IT4I Workflows signs in
+        if p.get("auth") == "workflows" or WASM:
+            names.remove("py4lexis")  # not used: IT4I Workflows or an access token signs in
         packages = {name: _version(name) for name in names}
         data = {
+            "runtime": "wasm" if WASM else "python",
             "pythonOk": sys.version_info >= MIN_PYTHON,
             "python": sys.version.split()[0],
-            "executable": sys.executable,
+            "executable": _pyodide_label() if WASM else sys.executable,
             "packages": packages,
             "qaasOutdated": _is_outdated(packages["qaas"]),
         }
@@ -1011,6 +1033,39 @@ def _close_heappe_clients() -> None:
                     obj.pool.join()
 
 
+def handle(server: Server, line: str) -> str | None:
+    """Answer one JSON request line; None for a blank line. Shared by `serve` and the
+    WebAssembly runtime, which calls it from a Node worker thread instead of a pipe."""
+    line = line.strip()
+    if not line:
+        return None
+    req_id = None
+    try:
+        req = json.loads(line)
+        req_id = req.get("id")
+        method = req.get("method", "")
+        if method.startswith("_") or not callable(getattr(server, method, None)):
+            raise BridgeError(f"Unknown method: {method}")
+        if method != "check" and (problem := _environment_problem()):
+            raise problem
+        try:
+            result = getattr(server, method)(req.get("params") or {})
+        except ModuleNotFoundError as exc:
+            if (exc.name or "").split(".")[0] not in QAAS_MODULES:
+                raise
+            raise EnvironmentProblem(
+                f"{exc.name} is not installed in {sys.executable}. Install qaas into this environment "
+                "or select another interpreter."
+            ) from exc
+        response = {"id": req_id, "result": result}
+    except BridgeError as exc:
+        response = {"id": req_id, "error": {"type": exc.kind, "message": str(exc)}}
+    except Exception as exc:
+        traceback.print_exc(file=sys.stderr)
+        response = {"id": req_id, "error": {"type": type(exc).__name__, "message": str(exc)}}
+    return json.dumps(response, default=str)
+
+
 def serve() -> int:
     proto_in = os.fdopen(os.dup(0), "r", encoding="utf-8")
     proto_out = os.fdopen(os.dup(1), "w", encoding="utf-8", buffering=1)
@@ -1020,34 +1075,9 @@ def serve() -> int:
 
     server = Server()
     for line in proto_in:
-        line = line.strip()
-        if not line:
-            continue
-        req_id = None
-        try:
-            req = json.loads(line)
-            req_id = req.get("id")
-            method = req.get("method", "")
-            if method.startswith("_") or not callable(getattr(server, method, None)):
-                raise BridgeError(f"Unknown method: {method}")
-            if method != "check" and (problem := _environment_problem()):
-                raise problem
-            try:
-                result = getattr(server, method)(req.get("params") or {})
-            except ModuleNotFoundError as exc:
-                if (exc.name or "").split(".")[0] not in QAAS_MODULES:
-                    raise
-                raise EnvironmentProblem(
-                    f"{exc.name} is not installed in {sys.executable}. Install qaas into this environment "
-                    "or select another interpreter."
-                ) from exc
-            response = {"id": req_id, "result": result}
-        except BridgeError as exc:
-            response = {"id": req_id, "error": {"type": exc.kind, "message": str(exc)}}
-        except Exception as exc:
-            traceback.print_exc(file=sys.stderr)
-            response = {"id": req_id, "error": {"type": type(exc).__name__, "message": str(exc)}}
-        proto_out.write(json.dumps(response, default=str) + "\n")
+        response = handle(server, line)
+        if response is not None:
+            proto_out.write(response + "\n")
     _close_heappe_clients()
     return 0
 

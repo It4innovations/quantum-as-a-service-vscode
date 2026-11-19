@@ -7,6 +7,7 @@ import types
 import unittest
 from pathlib import Path
 from typing import ClassVar
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "python"))
 
@@ -81,6 +82,7 @@ class ConnectionTests(unittest.TestCase):
         provider = qaas_bridge.Server()._provider({"project": "p", "token": jwt(typ="Bearer")})
         self.assertEqual(provider.kwargs, {})
 
+    @unittest.skipIf(qaas_bridge.WASM, "py4lexis sign-in is not available in the WebAssembly runtime")
     def test_refresh_token_uses_session_on_instance_and_renews_clients(self):
         server = qaas_bridge.Server()
         refresh = jwt(typ="Refresh")
@@ -102,6 +104,7 @@ class ConnectionTests(unittest.TestCase):
         self.assertEqual(len(server._providers), 1)
         self.assertEqual(len(FakeSession.instances), 1)
 
+    @unittest.skipIf(qaas_bridge.WASM, "py4lexis sign-in is not available in the WebAssembly runtime")
     def test_browser_login_session_targets_instance(self):
         server = qaas_bridge.Server()
         me = server.whoami({"project": "p", "instance": self.test_instance})
@@ -133,9 +136,26 @@ class ConnectionTests(unittest.TestCase):
                 server._provider({**p, "token": token})
         self.assertEqual(FakeSession.instances, [])
 
+    @unittest.skipIf(qaas_bridge.WASM, "py4lexis sign-in is not available in the WebAssembly runtime")
     def test_check_leaves_out_py4lexis_in_workflows_mode(self):
         self.assertIn("py4lexis", qaas_bridge.Server().check({})["packages"])
         self.assertNotIn("py4lexis", qaas_bridge.Server().check({"auth": "workflows"})["packages"])
+
+    def test_wasm_runtime_refuses_py4lexis_sign_in(self):
+        """In Pyodide py4lexis is only a placeholder: no browser login, no refresh tokens, no revoking them."""
+        server = qaas_bridge.Server()
+        with mock.patch.object(qaas_bridge, "WASM", True):
+            for token in (None, jwt(typ="Refresh")):
+                with self.assertRaisesRegex(qaas_bridge.SignInRequired, "WebAssembly runtime"):
+                    server._provider({"project": "p", "token": token})
+            self.assertEqual(server._provider({"project": "p", "token": jwt(typ="Bearer")}).token, jwt(typ="Bearer"))
+            out = server.logout({"tokens": [{"token": jwt(typ="Refresh")}]})
+            self.assertEqual(out["revoked"], 0)
+            self.assertRegex(out["failed"][0], "qaas.runtime")
+            check = server.check({})
+            self.assertEqual(check["runtime"], "wasm")
+            self.assertNotIn("py4lexis", check["packages"])
+        self.assertEqual(FakeSession.instances, [])
 
     def test_workflows_mode_drops_clients_of_the_previous_token(self):
         server = qaas_bridge.Server()

@@ -2,7 +2,7 @@
   "name": "qaas-vscode",
   "displayName": "Quantum-as-a-Service (QHEAppE)",
   "description": "Run OpenQASM 3 and Qiskit circuits on the VLQ quantum computer through LEXIS and HEAppE: job manager, result downloads, billed-time estimates. AI tools were used to help implement this extension.",
-  "version": "0.0.2",
+  "version": "0.1.0",
   "publisher": "quantum-as-a-service-vscode",
   "author": {
     "name": "IT4Innovations National Supercomputing Center, VSB - Technical University of Ostrava",
@@ -744,6 +744,19 @@
     "configuration": {
       "title": "Quantum-as-a-Service",
       "properties": {
+        "qaas.runtime": {
+          "type": "string",
+          "enum": [
+            "python",
+            "wasm"
+          ],
+          "enumDescriptions": [
+            "A local Python 3.12 with qaas (qaas.pythonPath). Supports every sign-in method.",
+            "qaas in WebAssembly (Pyodide), bundled with the extension: no local Python needed. Signs in with IT4I Workflows or an access token only; no browser login or refresh tokens."
+          ],
+          "default": "python",
+          "markdownDescription": "Where QaaS runs qaas: a local Python, or the WebAssembly build bundled with the extension. `Run Python File on VLQ` and calibration notebooks always use your Python."
+        },
         "qaas.pythonPath": {
           "type": "string",
           "default": "",
@@ -917,7 +930,10 @@
     "pretest": "npm run compile",
     "test": "vscode-test",
     "package": "vsce package",
-    "test:py": "python -m unittest discover -s python/tests"
+    "test:py": "python -m unittest discover -s python/tests",
+    "wasm:status": "uv run --python 3.13 qaas-wasm/build.py status",
+    "wasm:build": "uv run --python 3.13 qaas-wasm/build.py build",
+    "wasm:test": "npm run compile && node qaas-wasm/smoke-test.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "2.6.8",

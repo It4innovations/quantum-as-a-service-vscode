@@ -1,7 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.1.0
 
+- WebAssembly runtime (`qaas.runtime: wasm`): the Python bridge runs in Pyodide in a worker thread of the extension host, with qaas, qiskit (compiled to WebAssembly) and the IQM stack bundled in `wasm/`, so no local Python is needed. Signs in through IT4I Workflows or an access token. `npm run wasm:build` builds or updates the bundle for a new qaas or Pyodide release.
 - Sign in through the IT4I Workflows extension: `qaas.workflowsIntegration` (off by default, then QaaS signs in with py4lexis as before) takes a short-lived access token from the IT4I Workflows API for every use, keeps it in memory only and never imports py4lexis; `qaas.workflowsService` picks IT4I Workflows (`core`) or EFP Workflows (`efp`).
 - Long-running Python bridge: one LEXIS login per session.
 - Job manager: jobs view, persistence across restarts, background refresh, import from HEAppE, cancel, notifications.

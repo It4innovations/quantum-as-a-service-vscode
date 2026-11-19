@@ -1,6 +1,6 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
-import { Bridge } from "./bridge";
+import { Bridge, currentRuntime } from "./bridge";
 import { CalibrationCommands, CalibrationStore, CalibrationsTreeProvider } from "./calibrations";
 import { cfg, currentTarget, devEnvPath, devOverrides, lexisInstance, requireProject, targetEnv } from "./config";
 import { devEnvTemplate, instanceFromTokenKey, instanceLabel, type LexisInstance } from "./core/devEnv";
@@ -551,7 +551,10 @@ export function activate(context: vscode.ExtensionContext): void {
     ...qasm.register(),
 
     vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration("qaas.pythonPath")) {
+      if (
+        e.affectsConfiguration("qaas.runtime") ||
+        (e.affectsConfiguration("qaas.pythonPath") && currentRuntime() === "python")
+      ) {
         bridge.restart();
       }
       if (e.affectsConfiguration("qaas.workflowsIntegration") || e.affectsConfiguration("qaas.workflowsService")) {

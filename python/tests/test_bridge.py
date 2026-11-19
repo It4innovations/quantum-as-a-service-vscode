@@ -42,6 +42,7 @@ class AccessTokenTests(unittest.TestCase):
         self.assertEqual(out["token"], token)
         self.assertTrue(out["expiresAt"].startswith("2030-03-17"))
 
+    @unittest.skipIf(qaas_bridge.WASM, "py4lexis sign-in is not available in the WebAssembly runtime")
     def test_refresh_token_is_exchanged_never_returned(self):
         refresh = _jwt({"typ": "Offline"})
         access = _jwt({"typ": "Bearer"})
@@ -76,6 +77,7 @@ class LogoutTests(unittest.TestCase):
     def tearDown(self):
         qaas_bridge._new_session = self._orig
 
+    @unittest.skipIf(qaas_bridge.WASM, "py4lexis sign-in is not available in the WebAssembly runtime")
     def test_revokes_live_sessions_and_stored_refresh_tokens_and_clears_state(self):
         server = qaas_bridge.Server()
         browser, live = _Session(), _Session()

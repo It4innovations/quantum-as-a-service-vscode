@@ -99,4 +99,34 @@ suite("QaaS extension", () => {
     );
     assert.ok(lenses.some((l) => l.command?.command === "qaas.runQasmWithOperator"));
   });
+
+  test("the WebAssembly runtime checks OpenQASM without a local Python", async function () {
+    const ext = vscode.extensions.all.find((e) => e.packageJSON.name === "qaas-vscode");
+    if (!ext || !fs.existsSync(path.join(ext.extensionPath, "wasm", "manifest.json"))) {
+      this.skip(); // wasm/ is built by npm run wasm:build
+    }
+    this.timeout(120_000);
+    const settings = () => vscode.workspace.getConfiguration("qaas");
+    await settings().update("runtime", "wasm", vscode.ConfigurationTarget.Global);
+    // The runtime change restarts the bridge; open the document after that.
+    await new Promise((r) => setTimeout(r, 500));
+    try {
+      // qiskit's OpenQASM 3 importer, in Pyodide in a worker of this extension host, rejects it.
+      const doc = await vscode.workspace.openTextDocument({
+        language: "openqasm",
+        content: 'OPENQASM 3.0;\ninclude "stdgates.inc";\nqubit[2] q;\nh q[0];\ncx q[0] q[1];\n',
+      });
+      const errors = () =>
+        vscode.languages.getDiagnostics(doc.uri).filter((d) => d.severity === vscode.DiagnosticSeverity.Error);
+      try {
+        await waitFor(() => (errors().length ? true : undefined), 90_000);
+      } catch {
+        const all = vscode.languages.getDiagnostics().map(([u, d]) => [u.toString(), d.map((x) => x.message)]);
+        throw new Error(`no error diagnostic on ${doc.uri.toString()}; all: ${JSON.stringify(all)}`);
+      }
+      assert.match(errors()[0].message, /parse/i);
+    } finally {
+      await settings().update("runtime", undefined, vscode.ConfigurationTarget.Global);
+    }
+  });
 });

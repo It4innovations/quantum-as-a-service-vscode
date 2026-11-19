@@ -15,6 +15,7 @@ Status: ✅ available and tested (live items verified on VLQ, 2026-11-11) · �
 | Find interpreters: workspace venvs, conda / miniconda / miniforge envs, pyenv versions, Python extension environments, system Python | ✅ | `QaaS: Select Python Interpreter` shows each one's Python version and installed qaas |
 | Create a Python 3.12 venv (from any 3.12 interpreter, e.g. pyenv) or a conda env, then install qaas | ✅ | `QaaS: Create Python Environment for qaas` |
 | Install / upgrade `qaas[<extra>]>=1.0.0,<2` from PyPI | ✅ | Runs `python -m pip` as a VS Code task. Checks for Python 3.12 and warns outside a venv/conda env |
+| Run without a local Python: qaas in WebAssembly, bundled with the extension (`qaas.runtime: wasm`) | 🔶 | See [WebAssembly runtime](#webassembly-runtime-no-local-python). Same bridge code; its Python tests pass in Pyodide and requests reach the LEXIS API. Sign-in through IT4I Workflows or an access token only. Not yet verified against live VLQ |
 | Environment check (qaas, qiskit, iqm-client, iqm-pulla, py4lexis versions) | ✅ | Flags qaas older than 1.0.0. Runs before LEXIS commands: an unsuitable interpreter (e.g. macOS's Python 3.9) gets Select Interpreter / Create Environment / Install qaas instead of a crash |
 
 ### Login and backends
@@ -208,6 +209,7 @@ for budgeting). Submission latency of 3–15 s is not billed.
 
 | Setting | Default | Description |
 | --- | --- | --- |
+| `qaas.runtime` | `python` | `wasm`: run qaas in the WebAssembly runtime bundled with the extension instead of a local Python (see below) |
 | `qaas.pythonPath` | *(empty)* | Python 3.12 with qaas. Empty uses the Python extension's selection, then `python3`. A value from workspace settings is used only after you allow it once (interpreters picked with **Select Python Interpreter** are allowed automatically); the same applies to `qaas.condaPath` |
 | `qaas.condaPath` | *(empty)* | `conda` executable when it is not found automatically |
 | `qaas.packageExtra` | `iqm_qiskit` | IQM extra installed with qaas |
@@ -240,6 +242,25 @@ short-lived **access token** issued by the bridge (also after a browser login), 
 refresh token, because everything started in that terminal can read it. Scripts that still need
 LEXIS after it expires (usually minutes; the expiry is shown when the script starts) must be run
 again.
+
+## WebAssembly runtime (no local Python)
+
+With `qaas.runtime` set to `wasm`, the extension runs its Python bridge in
+[Pyodide](https://pyodide.org) (CPython compiled to WebAssembly) in a worker thread of VS Code's
+extension host. qaas, qiskit (compiled to WebAssembly) and the IQM stack come with the extension in
+its `wasm/` folder, so no Python, venv or `pip install` is needed.
+
+- The same bridge code serves every feature: transpile, run, jobs, downloads, calibrations,
+  pulse-level operators, ideal simulation, OpenQASM checks. Result files are written to the same
+  folders. Not yet verified against live VLQ.
+- Sign in through IT4I Workflows (`qaas.workflowsIntegration`) or paste an **access token**. py4lexis
+  cannot run there, so there is no browser login, no refresh tokens and no revoking them on log out.
+- The first LEXIS command of a window loads the runtime (about 10 s); the status bar shows it.
+- `Run Python File on VLQ` and calibration notebooks still run your own Python.
+- Needs JSPI (WebAssembly stack switching), which VS Code's Electron has. qiskit runs single-threaded.
+
+`wasm/` is not in git. Build it, and update it to a new qaas or Pyodide release, with
+`npm run wasm:build`; see [qaas-wasm/README.md](qaas-wasm/README.md).
 
 ## Sign in through IT4I Workflows
 
@@ -307,7 +328,9 @@ QAAS_LEXIS_TOKEN=<refresh or offline token>
 
 The extension does not reimplement the client. It starts
 [`python/qaas_bridge.py`](python/qaas_bridge.py) once with your interpreter and talks to it
-over stdin/stdout (one JSON request and response per line). The process keeps the LEXIS login
+over stdin/stdout (one JSON request and response per line). With `qaas.runtime: wasm` the same
+bridge runs in Pyodide in a worker thread ([`src/wasm/worker.ts`](src/wasm/worker.ts)), with the
+same requests and responses. The process keeps the LEXIS login
 and HEAppE clients alive, and calls `qheappe_client` (`QProvider`, `QBackend`, `QJob`).
 Library output goes to the **QaaS** output channel. py4lexis writes its log (no tokens) to
 `lexis.log` in the extension's log folder (**Developer: Open Extension Logs Folder**), readable
@@ -324,7 +347,10 @@ npm run test:py        # Python bridge and operator code generator (needs qaas[i
 npm test               # integration tests in a downloaded VS Code
 npm run lint           # Biome (TypeScript/JSON) + Ruff (Python)
 npm run format         # format everything
-npm run package        # build a .vsix
+npm run package        # build a .vsix (includes wasm/ when it has been built)
+npm run wasm:status    # bundled vs. latest qaas and Pyodide release
+npm run wasm:build     # build wasm/ (WebAssembly runtime) for the latest qaas release
+npm run wasm:test      # smoke test of wasm/, incl. the Python tests inside Pyodide
 ```
 
 Formatting and linting: [Biome](https://biomejs.dev/) for TypeScript, JavaScript and JSON;

@@ -7,3 +7,8 @@ __pycache__/
 lexis_logs.log
 .qaas/dev.env
 qaas-results/
+# WebAssembly runtime, built by npm run wasm:build (packaged into the .vsix)
+/wasm/
+# Generated when the build packs the stubs
+qaas-wasm/build-recipe/stubs/*/build/
+*.egg-info/

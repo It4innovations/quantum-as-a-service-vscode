@@ -1,0 +1,13 @@
+--- a/rayon-core-1.12.1/src/lib.rs	2006-07-24 03:21:28.000000000 +0200
++++ b/rayon-core-1.12.1/src/lib.rs	2026-11-18 15:46:57.294771722 +0100
+@@ -754,7 +754,9 @@
+     }
+ 
+     fn is_unsupported(&self) -> bool {
+-        matches!(&self.kind, ErrorKind::IOError(e) if e.kind() == io::ErrorKind::Unsupported)
++        // Pyodide/emscripten without pthreads reports EAGAIN (WouldBlock) on thread spawn.
++        matches!(&self.kind, ErrorKind::IOError(e) if e.kind() == io::ErrorKind::Unsupported
++            || (cfg!(target_os = "emscripten") && e.kind() == io::ErrorKind::WouldBlock))
+     }
+ }
+ 
