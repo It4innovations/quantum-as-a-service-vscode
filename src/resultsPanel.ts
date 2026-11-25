@@ -10,6 +10,7 @@ import {
   totalVariationDistance,
 } from "./core/stats";
 import type { JobRecord } from "./jobs";
+import { showError } from "./notify";
 
 const MAX_BARS = 64;
 const MAX_HEATMAP_BITS = 16;
@@ -95,7 +96,7 @@ export class ResultsPanel {
             break;
         }
       } catch (e) {
-        vscode.window.showErrorMessage(`QaaS: ${(e as Error).message}`);
+        showError(`QaaS: ${(e as Error).message}`);
       }
     });
     this.render();

@@ -1,7 +1,7 @@
 {
   "name": "qaas-vscode",
   "displayName": "Quantum-as-a-Service (QHEAppE)",
-  "description": "Run OpenQASM 3 and Qiskit circuits on the VLQ quantum computer through LEXIS and HEAppE: job manager, result downloads, billed-time estimates. AI tools were used to help implement this extension.",
+  "description": "Run OpenQASM 3 and Qiskit circuits on the quantum computers available to your LEXIS project, through LEXIS and HEAppE: job manager, result downloads, billed-time estimates. AI tools were used to help implement this extension.",
   "version": "0.1.0",
   "publisher": "quantum-as-a-service-vscode",
   "author": {
@@ -31,7 +31,7 @@
     "quantum",
     "qiskit",
     "IQM",
-    "VLQ",
+    "QPU",
     "LEXIS",
     "HEAppE",
     "QHEAppE"
@@ -121,7 +121,7 @@
     "commands": [
       {
         "command": "qaas.checkEnvironment",
-        "title": "Check Python Environment",
+        "title": "Check qaas Environment",
         "category": "QaaS"
       },
       {
@@ -194,20 +194,30 @@
         "category": "QaaS"
       },
       {
+        "command": "qaas.showOutput",
+        "title": "Show Output",
+        "category": "QaaS"
+      },
+      {
+        "command": "qaas.showBundledLibraries",
+        "title": "Show Bundled Python Libraries",
+        "category": "QaaS"
+      },
+      {
         "command": "qaas.runCurrentFile",
-        "title": "Run Python File on VLQ",
+        "title": "Run Python File on QPU",
         "category": "QaaS",
         "icon": "$(play)"
       },
       {
         "command": "qaas.runQasm",
-        "title": "Run on VLQ",
+        "title": "Run on QPU",
         "category": "QaaS",
         "icon": "$(play)"
       },
       {
         "command": "qaas.transpileQasm",
-        "title": "Transpile for VLQ",
+        "title": "Transpile for QPU",
         "category": "QaaS",
         "icon": "$(git-compare)"
       },
@@ -222,6 +232,18 @@
         "title": "Refresh Job Status",
         "category": "QaaS",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "qaas.jobs.autoRefreshOff",
+        "title": "Automatic Refresh of Active Jobs Is On (Click to Turn Off)",
+        "category": "QaaS",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "qaas.jobs.autoRefreshOn",
+        "title": "Automatic Refresh of Active Jobs Is Off (Click to Turn On)",
+        "category": "QaaS",
+        "icon": "$(eye-closed)"
       },
       {
         "command": "qaas.jobs.import",
@@ -288,7 +310,7 @@
       },
       {
         "command": "qaas.runQasmWithOperator",
-        "title": "Run on VLQ with Pulse Operator…",
+        "title": "Run on QPU with Pulse Operator…",
         "category": "QaaS",
         "icon": "$(pulse)"
       },
@@ -533,6 +555,16 @@
           "group": "navigation@1"
         },
         {
+          "command": "qaas.jobs.autoRefreshOff",
+          "when": "view == qaas.jobs && config.qaas.autoRefreshJobs",
+          "group": "navigation@1"
+        },
+        {
+          "command": "qaas.jobs.autoRefreshOn",
+          "when": "view == qaas.jobs && !config.qaas.autoRefreshJobs",
+          "group": "navigation@1"
+        },
+        {
           "command": "qaas.jobs.import",
           "when": "view == qaas.jobs",
           "group": "navigation@2"
@@ -751,11 +783,11 @@
             "wasm"
           ],
           "enumDescriptions": [
-            "A local Python 3.12 with qaas (qaas.pythonPath). Supports every sign-in method.",
-            "qaas in WebAssembly (Pyodide), bundled with the extension: no local Python needed. Signs in with IT4I Workflows or an access token only; no browser login or refresh tokens."
+            "A local Python 3.12 with qaas (qaas.pythonPath), e.g. to use another qaas version.",
+            "qaas in WebAssembly (Pyodide), bundled with the extension: no local Python needed."
           ],
-          "default": "python",
-          "markdownDescription": "Where QaaS runs qaas: a local Python, or the WebAssembly build bundled with the extension. `Run Python File on VLQ` and calibration notebooks always use your Python."
+          "default": "wasm",
+          "markdownDescription": "Where QaaS runs qaas: the WebAssembly build bundled with the extension (no local Python needed), or a local Python with qaas. Python scripts (`Run Python File on QPU`) run there too; a local Python is only needed for calibration notebooks and scripts that import libraries the bundle lacks (`QaaS: Show Bundled Python Libraries`)."
         },
         "qaas.pythonPath": {
           "type": "string",
@@ -808,8 +840,8 @@
         },
         "qaas.backendName": {
           "type": "string",
-          "default": "VLQ",
-          "description": "Quantum backend name."
+          "default": "",
+          "markdownDescription": "Quantum backend name. Empty: the backend of the LEXIS resource (`qaas.lexisResource`), as qaas chooses it. `QaaS: Choose Backend` lists the backends of your project."
         },
         "qaas.lexisAaiUrl": {
           "type": "string",
@@ -845,12 +877,17 @@
         "qaas.showEstimates": {
           "type": "boolean",
           "default": true,
-          "description": "Show estimated VLQ billed time above job submissions in Python files, notebooks and .qasm files."
+          "description": "Show estimated billed QPU time above job submissions in Python files, notebooks and .qasm files (for backends with a known billing model)."
         },
         "qaas.validateQasm": {
           "type": "boolean",
           "default": true,
           "description": "Check OpenQASM 3 files with Qiskit's importer when they are opened or saved."
+        },
+        "qaas.autoRefreshJobs": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Refresh the state of active (pending, queued, running) jobs in the background every `#qaas.jobPollSeconds#` seconds. Toggle it with the eye button in the Jobs view (open eye: on, closed eye: off)."
         },
         "qaas.jobPollSeconds": {
           "type": "integer",

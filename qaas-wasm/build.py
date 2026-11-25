@@ -6,8 +6,9 @@
 """Build the extension's WebAssembly runtime (wasm/): qaas + its dependency closure for Pyodide.
 
     uv run --python 3.13 qaas-wasm/build.py status                 # bundled vs. latest qaas / Pyodide
-    uv run --python 3.13 qaas-wasm/build.py build                  # latest qaas release (pre-releases too)
+    uv run --python 3.13 qaas-wasm/build.py build                  # qaas DEFAULT_QAAS (v1.1.0)
     uv run --python 3.13 qaas-wasm/build.py build --qaas v1.2.0 --pyodide 0.29.3
+    uv run --python 3.13 qaas-wasm/build.py build --qaas latest    # newest release (--stable: no pre-releases)
     uv run --python 3.13 qaas-wasm/build.py assemble --wheelhouse DIR   # only re-assemble wasm/
     npm run wasm:test                                               # smoke test of wasm/
 
@@ -58,16 +59,23 @@ OUT = REPO / "wasm"
 CACHE = Path(os.environ.get("QAAS_WASM_CACHE") or Path.home() / ".cache" / "qaas-wasm")
 
 QAAS_REPO = "It4innovations/quantum-as-a-service"
+DEFAULT_QAAS = "v1.1.0"  # the version the extension is built and tested with (src/environments.ts)
 DEFAULT_PYODIDE = "0.29.3"
 DEFAULT_EXTRA = "iqm_qiskit"  # matches the extension's default qaas.packageExtra
+# IT4I's package index: py4lexis (LEXIS login) is published there, not on PyPI.
+EXTRA_INDEX = "https://opencode.it4i.eu/api/v4/projects/107/packages/pypi/simple"
 # Not importable in Pyodide and never imported by the bridge; micropip placeholders keep the
 # metadata of packages that declare them as dependencies consistent.
-MOCKED = ("py4lexis", "grpcio", "symengine", "scipy-stubs", "psutil")
+MOCKED = ("grpcio", "symengine", "scipy-stubs", "psutil")
 # Imported at qaas import time; replaced by our own wheels.
 STUBS = {"qiskit-aer": RECIPE / "stubs" / "qiskit_aer_stub"}
 ADAPTER = RECIPE / "stubs" / "qaas_pyodide"
 # Pyodide stdlib modules loaded in addition to the dependency closure.
 ALWAYS_LOAD = ("ssl",)
+# Pyodide packages bundled for user scripts (Run Python File), loaded only when a script runs.
+SCRIPT_PACKAGES = ("matplotlib",)
+# Standard-library modules Pyodide leaves out or cannot use (the editor hints about them).
+NOT_IN_PYODIDE_STDLIB = {"tkinter", "turtle", "turtledemo", "curses", "readline", "dbm", "idlelib", "ensurepip", "venv"}
 # Toolchain for compiled packages (emscripten comes from the Pyodide cross-build environment).
 RUST_VERSION = "1.97.0"
 BINARYEN_VERSION = "121"  # emscripten's conda pin (117) lacks --no-stack-ir
@@ -146,10 +154,34 @@ _pypi: dict[tuple[str, str], dict] = {}
 
 
 def pypi_release(name: str, version: str) -> dict:
+    """PyPI's JSON for a release; for packages only on EXTRA_INDEX the same shape from its simple index."""
     key = (name, version)
     if key not in _pypi:
-        _pypi[key] = json.loads(fetch(f"https://pypi.org/pypi/{name}/{version}/json"))
+        try:
+            _pypi[key] = json.loads(fetch(f"https://pypi.org/pypi/{name}/{version}/json"))
+        except urllib.error.HTTPError as e:
+            if e.code != 404:
+                raise
+            _pypi[key] = index_release(name, version)
     return _pypi[key]
+
+
+def index_release(name: str, version: str) -> dict:
+    """Files of a release on EXTRA_INDEX (PEP 503 page) and the requirements from its wheel."""
+    page = fetch(f"{EXTRA_INDEX}/{name}/").decode()
+    urls = []
+    for href, file, digest in re.findall(r'href="([^"#]*/([^/"#]+))#sha256=([0-9a-f]{64})"', page):
+        stem = canon(file.split("-")[0])
+        if stem == canon(name) and file.split("-")[1].removesuffix(".tar.gz").removesuffix(".zip") == version:
+            kind = "bdist_wheel" if file.endswith(".whl") else "sdist"
+            urls.append({"filename": file, "url": href, "digests": {"sha256": digest}, "packagetype": kind})
+    if not urls:
+        sys.exit(f"{name} {version} is neither on PyPI nor on {EXTRA_INDEX}")
+    requires = None
+    wheel = next((f for f in urls if PURE_WHEEL.search(f["filename"])), None)
+    if wheel:
+        requires = wheel_requires(download_verified(wheel, CACHE / "index"))
+    return {"urls": urls, "info": {"requires_dist": requires}}
 
 
 def prefetch_pypi(pins: list[tuple[str, str]]) -> None:
@@ -157,12 +189,18 @@ def prefetch_pypi(pins: list[tuple[str, str]]) -> None:
     from concurrent.futures import ThreadPoolExecutor
 
     with ThreadPoolExecutor(16) as pool:
-        list(pool.map(lambda p: pypi_release(*p), [p for p in pins if p not in _pypi and p[0] != "qaas"]))
+        todo = [p for p in pins if p not in _pypi and p[0] != "qaas" and not is_url(p[1])]
+        list(pool.map(lambda p: pypi_release(*p), todo))
 
 
 def pypi_files(name: str, version: str) -> list[dict]:
     """Files of a release on PyPI (filename, url, digests, packagetype)."""
     return pypi_release(name, version)["urls"]
+
+
+def is_url(version: str) -> bool:
+    """A direct-URL pin (`name @ git+https://...`) in place of a version."""
+    return "://" in version
 
 
 def wheel_requires(wheel: Path) -> list[str]:
@@ -403,10 +441,28 @@ def resolve(
 
     def compile_(out: Path, check: bool = True) -> list[tuple[str, str]] | None:
         cmd = ["uv", "pip", "compile", req, "--python-version", py, "--python-platform", "linux"]
-        cmd += ["--override", overrides, "--constraint", constraints, "--no-header", "--no-annotate", "--quiet"]
-        if run([*cmd, "-o", out], check=check) is None:
-            return None
-        found = re.findall(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s;]+)", out.read_text(), re.M)
+        cmd += ["--extra-index-url", EXTRA_INDEX, "--override", overrides, "--constraint", constraints]
+        cmd += ["--no-header", "--no-annotate", "--quiet", "-o", out]
+        for _ in range(10):
+            print("   $", " ".join(str(c) for c in cmd), flush=True)
+            res = subprocess.run([str(c) for c in cmd], text=True, capture_output=True, check=False)
+            # uv takes a git dependency of a dependency (py4lexis -> python-http-irods-client @ git+...) only
+            # when it is also a direct requirement, and says which line to add.
+            hint = re.search(r"Consider adding `([^`]+ @ [^`]+)` to your", res.stderr)
+            if res.returncode == 0 or not hint:
+                break
+            print(f"   adding the direct requirement {hint.group(1)}")
+            req.write_text(req.read_text() + hint.group(1) + "\n")
+        if res.returncode:
+            if not check:
+                return None
+            sys.exit(f"dependency resolution failed:\n{res.stderr}")
+        text = out.read_text()
+        found = re.findall(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s;]+)", text, re.M)
+        # Direct references, e.g. py4lexis's python-http-irods-client @ git+https://...; qaas is the local wheel.
+        found += [
+            (n, u) for n, u in re.findall(r"^([A-Za-z0-9][A-Za-z0-9._-]*) @ (\S+)", text, re.M) if canon(n) != "qaas"
+        ]
         return [(canon(n), v) for n, v in found]
 
     from_pyodide: set[str] = set()
@@ -417,7 +473,9 @@ def resolve(
         constraints.write_text("".join(f"{n}<{v}\n" for n, v in sorted(below.items())))
         closure = compile_(work / "requirements.lock.txt")
         prefetch_pypi([(n, v) for n, v in closure if n not in MOCKED and n not in STUBS])
-        new = {n for n, v in closure if n in native and n not in from_pyodide and not pure_wheel(n, v)}
+        new = {
+            n for n, v in closure if n in native and n not in from_pyodide and not is_url(v) and not pure_wheel(n, v)
+        }
         if new:
             print(f"   from Pyodide: {', '.join(f'{n}=={native[n]}' for n in sorted(new))}")
             from_pyodide |= new
@@ -434,8 +492,35 @@ def resolve(
         sys.exit("dependency resolution did not settle")
     overrides.write_text(pins)
     full = dict(compile_(work / "full.txt", check=False) or [])
-    mocks = {n: full.get(canon(n), "0") for n in MOCKED}
+    # Versions for the placeholders: resolved when possible (py4lexis is not on PyPI), else the
+    # lowest version the closure's requirements allow.
+    named = required_versions(closure, qaas_wheel, extra, py)
+    mocks = {n: full.get(canon(n)) or named.get(canon(n), "0") for n in MOCKED}
     return closure, from_pyodide, mocks
+
+
+def required_versions(closure: list[tuple[str, str]], qaas_wheel: Path, extra: str, py: str) -> dict[str, str]:
+    """{package: lowest version a requirement of the closure names} for the MOCKED packages."""
+    from packaging.requirements import Requirement
+
+    wanted, found = {canon(n) for n in MOCKED}, {}
+    for name, version in [("qaas", ""), *(p for p in closure if p[0] != "qaas")]:
+        if name in MOCKED or name in STUBS or is_url(version):
+            continue
+        if name == "qaas":
+            requires, extras = wheel_requires(qaas_wheel), {"", extra}
+        else:
+            requires, extras = pypi_release(name, version)["info"].get("requires_dist") or [], {""}
+        for line in requires:
+            r = Requirement(line)
+            if canon(r.name) not in wanted or canon(r.name) in found:
+                continue
+            if r.marker and not any(r.marker.evaluate({"python_version": py, "extra": e}) for e in extras):
+                continue
+            versions = [s.version.replace(".*", ".0") for s in r.specifier if s.operator in ("==", ">=", "~=", "===")]
+            if versions:
+                found[canon(r.name)] = versions[0]
+    return found
 
 
 def pyodide_conflicts(
@@ -461,8 +546,9 @@ def pyodide_conflicts(
         "platform_python_implementation": "CPython",
     }
     found = []
-    for name, version in closure:
-        if name in from_pyodide or name in MOCKED or name in STUBS:
+    # qaas itself is in the lock as `qaas @ file://...`, not `qaas==...`: check its wheel explicitly.
+    for name, version in [("qaas", ""), *(p for p in closure if p[0] != "qaas")]:
+        if name in from_pyodide or name in MOCKED or name in STUBS or is_url(version):
             continue
         if name == "qaas":
             requires, extras = wheel_requires(qaas_wheel), {"", extra}
@@ -578,6 +664,25 @@ def build_native(name: str, version: str, tc: Toolchain, dist: PyodideDist, whee
         retag(w, dist.platform_tag, wheelhouse)
 
 
+def build_direct(name: str, url: str, wheelhouse: Path) -> None:
+    """Wheel of a direct git reference (git+https://host/repo.git@rev); must be pure Python."""
+    m = re.match(r"git\+(https://[^@]+)@(\S+)$", url)
+    if not m:
+        sys.exit(f"{name}: unsupported direct reference {url}")
+    repo, rev = m.groups()
+    say(f"{name} from {repo} at {rev[:12]}")
+    src = Path(tempfile.mkdtemp(prefix=f"{name}-", dir=CACHE))
+    run(["git", "clone", "-q", repo, src])
+    run(["git", "-C", src, "checkout", "-q", rev])
+    out = src / "dist"
+    run(["uv", "build", "--wheel", "-q", "-o", out, src])
+    wheel = next(out.glob("*.whl"))
+    if not PURE_WHEEL.search(wheel.name):
+        sys.exit(f"{name}: {wheel.name} is not pure Python; add a wasm32 build for it")
+    shutil.copy2(wheel, wheelhouse / wheel.name)
+    shutil.rmtree(src, ignore_errors=True)
+
+
 def collect(
     closure: list[tuple[str, str]], from_pyodide: set[str], dist: PyodideDist, tc: Toolchain, wheelhouse: Path
 ) -> list[str]:
@@ -589,6 +694,8 @@ def collect(
             continue
         if name in from_pyodide:
             load.append(dist.key(name))
+        elif is_url(version):
+            build_direct(name, version, wheelhouse)
         elif wheel := pure_wheel(name, version):
             download_verified(wheel, wheelhouse)
         else:
@@ -622,7 +729,8 @@ def assemble(wheelhouse: Path, info: dict, dist: PyodideDist) -> None:
     for name in PYODIDE_CORE:
         if (dist.dir / name).exists():
             shutil.copy2(dist.dir / name, stage / "pyodide" / name)
-    for key in dist.closure(["micropip", *info["pyodide_packages"]]):
+    keys = dist.closure(["micropip", *info["pyodide_packages"], *SCRIPT_PACKAGES])
+    for key in keys:
         shutil.copy2(dist.file(key), stage / "pyodide" / dist.packages[key]["file_name"])
     qaas = next(w for w in wheels if w.startswith("qaas-"))
     manifest = {
@@ -630,8 +738,18 @@ def assemble(wheelhouse: Path, info: dict, dist: PyodideDist) -> None:
         "qaas_version": wheel_name_version(qaas)[1],
         "pyodide_version": dist.version,
         "python_version": dist.python,
+        "script_packages": list(SCRIPT_PACKAGES),
         "wheels": wheels,
         "sha256": {w: sha256(stage / "wheels" / w) for w in wheels},
+        # For the extension's import check and "Show Bundled Python Libraries" (no Pyodide needed).
+        "modules": bundled_modules([stage / "wheels" / w for w in wheels], dist, keys),
+        "packages": {
+            **{wheel_name_version(w)[0]: wheel_name_version(w)[1] for w in wheels},
+            **{canon(dist.packages[k]["name"]): dist.packages[k]["version"] for k in keys},
+        },
+        "stdlib": sorted(
+            m for m in sys.stdlib_module_names if not m.startswith("_") and m not in NOT_IN_PYODIDE_STDLIB
+        ),
         "built": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     (stage / "manifest.json").write_text(json.dumps(manifest, indent=1) + "\n")
@@ -644,6 +762,22 @@ def assemble(wheelhouse: Path, info: dict, dist: PyodideDist) -> None:
     print(f"   {len(wheels)} wheels, {len(info['pyodide_packages'])} Pyodide packages, {size:.0f} MB")
 
 
+def bundled_modules(wheels: list[Path], dist: PyodideDist, keys: list[str]) -> list[str]:
+    """Top-level import names the bundle provides: from the wheels' files and Pyodide's lock."""
+    names: set[str] = set()
+    for wheel in wheels:
+        with zipfile.ZipFile(wheel) as z:
+            for entry in z.namelist():
+                top = entry.split("/")[0]
+                if top.endswith((".dist-info", ".data")) or top.startswith("_"):
+                    continue
+                if "/" in entry or top.endswith(".py"):
+                    names.add(top.removesuffix(".py"))
+    for key in keys:
+        names.update(dist.packages[key].get("imports", []))
+    return sorted(n for n in names if n.isidentifier())
+
+
 def smoke_test() -> None:
     say("Smoke test")
     run(["npm", "run", "compile"], cwd=REPO)
@@ -654,7 +788,9 @@ def smoke_test() -> None:
 
 
 def build(args: argparse.Namespace) -> None:
-    ref = args.qaas or latest_qaas(args.stable)
+    ref = args.qaas or DEFAULT_QAAS
+    if ref == "latest":
+        ref = latest_qaas(args.stable)
     dist = PyodideDist(args.pyodide)
     tc = Toolchain(dist)
     work = Path(tempfile.mkdtemp(prefix="build-", dir=CACHE))
@@ -692,8 +828,11 @@ def main() -> None:
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("status", help="bundled vs. latest qaas and Pyodide").set_defaults(func=status)
     b = sub.add_parser("build", help="build wasm/ for a qaas release")
-    b.add_argument("--qaas", help="qaas git tag (default: latest GitHub release, pre-releases included)")
-    b.add_argument("--stable", action="store_true", help="with no --qaas: skip pre-releases")
+    b.add_argument(
+        "--qaas",
+        help=f"qaas git tag (default {DEFAULT_QAAS}); 'latest' for the newest GitHub release, pre-releases included",
+    )
+    b.add_argument("--stable", action="store_true", help="with --qaas latest: skip pre-releases")
     b.add_argument("--pyodide", default=DEFAULT_PYODIDE, help=f"Pyodide version (default {DEFAULT_PYODIDE})")
     b.add_argument("--extra", default=DEFAULT_EXTRA, help=f"qaas extra (default {DEFAULT_EXTRA})")
     b.add_argument("--no-test", action="store_true", help="skip the smoke test")

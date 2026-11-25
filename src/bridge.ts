@@ -3,8 +3,8 @@ import { existsSync } from "node:fs";
 import * as path from "node:path";
 import { Worker } from "node:worker_threads";
 import * as vscode from "vscode";
-import { cfg, type Target } from "./config";
-import { PRODUCTION_AAI_URL } from "./core/devEnv";
+import { cfg, rememberBackend, type Target } from "./config";
+import { offerLogin } from "./loginPrompt";
 import { resolvePython } from "./python";
 import { trustedLoginInstance } from "./trust";
 import type { FromWorker, ToWorker, WasmWorkerData } from "./wasm/protocol";
@@ -14,6 +14,8 @@ export class BridgeError extends Error {
   constructor(
     message: string,
     readonly type: string,
+    /** CancelRefused: the job's state as HEAppE names it (e.g. DELETED). */
+    readonly state?: string,
   ) {
     super(message);
   }
@@ -43,9 +45,14 @@ const AUTH_METHODS = new Set([
 
 export type Runtime = "python" | "wasm";
 
-/** `qaas.runtime`: a local Python with qaas, or the WebAssembly build bundled with the extension. */
+let wasmBundled = false;
+
+/**
+ * `qaas.runtime`: the WebAssembly build bundled with the extension (default), or a local Python
+ * with qaas. A build without wasm/ (e.g. a development checkout) always uses Python.
+ */
 export function currentRuntime(): Runtime {
-  return cfg().get<string>("runtime") === "wasm" ? "wasm" : "python";
+  return wasmBundled && cfg().get<string>("runtime") !== "python" ? "wasm" : "python";
 }
 
 /** Where requests go: the Python process's stdin, or the WebAssembly worker. */
@@ -80,7 +87,9 @@ export class Bridge implements vscode.Disposable {
     private readonly output: vscode.OutputChannel,
     /** py4lexis log file; under the extension's per-user log folder, not the shared temp dir. */
     private readonly lexisLog?: string,
-  ) {}
+  ) {
+    wasmBundled = existsSync(path.join(extensionPath, "wasm", "manifest.json"));
+  }
 
   async request<T>(method: string, params: object = {}, token?: vscode.CancellationToken): Promise<T> {
     const transport = await this.ensure();
@@ -107,6 +116,22 @@ export class Bridge implements vscode.Disposable {
    * non-production instance chosen by the workspace or dev file needs the user's approval first.
    */
   async call<T>(method: string, target: Target, params: object = {}, token?: vscode.CancellationToken): Promise<T> {
+    const result = await this.callUnchecked<T>(method, target, params, token);
+    // The backend LEXIS reports for the resource, when none is configured (labels, billing model).
+    if (method === "backendInfo") {
+      rememberBackend((result as { name?: string }).name);
+    } else if (method === "backends" && !target.backend && Array.isArray(result) && result.length === 1) {
+      rememberBackend((result[0] as { name?: string }).name);
+    }
+    return result;
+  }
+
+  private async callUnchecked<T>(
+    method: string,
+    target: Target,
+    params: object,
+    token?: vscode.CancellationToken,
+  ): Promise<T> {
     if (currentAuthMode() === "workflows") {
       // Never fall back to a py4lexis login: the bridge refuses any token that is not an access token.
       if (AUTH_METHODS.has(method) && !target.token) {
@@ -204,7 +229,7 @@ export class Bridge implements vscode.Disposable {
     proc.stderr.setEncoding("utf8").on("data", (chunk: string) => {
       this.output.append(chunk);
       this.stderrBuf = (this.stderrBuf + chunk).slice(-4000);
-      this.detectLogin(chunk);
+      offerLogin(chunk);
     });
     proc.on("error", (err) => {
       this.output.appendLine(`[bridge] failed to start: ${err.message}`);
@@ -231,7 +256,11 @@ export class Bridge implements vscode.Disposable {
       );
     }
     this.output.appendLine(`[bridge] starting the WebAssembly runtime from ${bundleDir}`);
-    const workerData: WasmWorkerData = { bundleDir, pythonDir: path.join(this.extensionPath, "python") };
+    const workerData: WasmWorkerData = {
+      bundleDir,
+      pythonDir: path.join(this.extensionPath, "python"),
+      lexisLog: this.lexisLog,
+    };
     const worker = new Worker(path.join(__dirname, "wasm", "worker.js"), { workerData });
     let exited = false;
     const transport: Transport = {
@@ -258,6 +287,7 @@ export class Bridge implements vscode.Disposable {
           break;
         case "log":
           this.output.appendLine(msg.text);
+          offerLogin(msg.text);
           break;
         case "status":
           this.output.appendLine(`[wasm] ${msg.text}`);
@@ -292,7 +322,7 @@ export class Bridge implements vscode.Disposable {
   }
 
   private onMessage(line: string): void {
-    let msg: { id?: number; result?: unknown; error?: { type: string; message: string } };
+    let msg: { id?: number; result?: unknown; error?: { type: string; message: string; state?: string } };
     try {
       msg = JSON.parse(line);
     } catch {
@@ -305,36 +335,9 @@ export class Bridge implements vscode.Disposable {
     }
     this.pending.delete(msg.id);
     if (msg.error) {
-      p.reject(new BridgeError(msg.error.message, msg.error.type));
+      p.reject(new BridgeError(msg.error.message, msg.error.type, msg.error.state));
     } else {
       p.resolve(msg.result);
-    }
-  }
-
-  /** py4lexis prints the device-login URL; offer to open it (webbrowser.open fails on remote hosts). */
-  private detectLogin(chunk: string): void {
-    const m = /Open provided url in your browser[^:]*:\s*(https?:\/\/\S+)/.exec(chunk);
-    if (m) {
-      const url = m[1];
-      let host = url;
-      try {
-        host = new URL(url).host;
-      } catch {
-        // show the raw URL
-      }
-      const production = host === new URL(PRODUCTION_AAI_URL).host;
-      vscode.window
-        .showInformationMessage(
-          production
-            ? `QaaS: finish the LEXIS login in your browser (${host}).`
-            : `QaaS: finish the LEXIS login in your browser. The login page is on ${host}, not the LEXIS production login (${new URL(PRODUCTION_AAI_URL).host}).`,
-          "Open Login Page",
-        )
-        .then((choice) => {
-          if (choice) {
-            vscode.env.openExternal(vscode.Uri.parse(url));
-          }
-        });
     }
   }
 }

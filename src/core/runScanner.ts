@@ -147,6 +147,42 @@ function countCircuits(expr: string, scope: string, depth = 0): number | undefin
   return undefined;
 }
 
+/**
+ * For each character of Python source: true where it is code, false inside a comment or a string
+ * (including docstrings), so `backend.run(` mentioned there is not counted as a submission.
+ */
+export function codeMask(text: string): boolean[] {
+  const code = new Array<boolean>(text.length).fill(true);
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    if (c === "#") {
+      while (i < text.length && text[i] !== "\n") {
+        code[i++] = false;
+      }
+    } else if (c === '"' || c === "'") {
+      const quote = text.startsWith(c.repeat(3), i) ? c.repeat(3) : c;
+      code.fill(false, i, i + quote.length);
+      i += quote.length;
+      while (i < text.length && !text.startsWith(quote, i)) {
+        if (quote.length === 1 && text[i] === "\n") {
+          break; // unterminated single-line string
+        }
+        code[i] = false;
+        if (text[i] === "\\" && i + 1 < text.length) {
+          code[++i] = false;
+        }
+        i++;
+      }
+      code.fill(false, i, Math.min(text.length, i + quote.length));
+      i += quote.length;
+    } else {
+      i++;
+    }
+  }
+  return code;
+}
+
 function lineOf(text: string, index: number): number {
   let n = 0;
   for (let i = 0; i < index; i++) {
@@ -172,13 +208,14 @@ export function scanRunCalls(text: string, prelude = ""): RunCall[] {
   }
 
   const calls: RunCall[] = [];
+  const code = codeMask(text);
   for (const m of text.matchAll(/([A-Za-z_][\w.]*)\.(run|submit_playlist)\s*\(/g)) {
     const receiver = m[1];
     const kind = m[2] === "run" ? "run" : "playlist";
     const root = receiver.split(".")[0];
     const index = m.index ?? 0;
-    if (/^[ \t]*#/.test(text.slice(text.lastIndexOf("\n", index) + 1, index))) {
-      continue; // commented out
+    if (!code[index]) {
+      continue; // in a comment or a string
     }
     if (kind === "run") {
       if (EXCLUDED_RECEIVERS.has(root)) {

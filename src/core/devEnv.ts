@@ -134,7 +134,7 @@ PY4LEXIS_REALM=
 # Project, resource and backend on that instance
 QAAS_LEXIS_PROJECT=
 QAAS_LEXIS_RESOURCE=
-# QAAS_BACKEND_NAME=VLQ
+# QAAS_BACKEND_NAME=<backend name; empty: the resource's backend>
 
 # Refresh/offline token (recommended: renewed automatically) or an access token (expires in minutes).
 # Leave empty to log in through the browser on the instance above.

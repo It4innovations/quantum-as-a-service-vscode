@@ -1,13 +1,15 @@
 // Checks the extension's WebAssembly runtime (wasm/) through the same worker the extension uses
-// (out/wasm/worker.js): startup, the bridge's methods without a LEXIS login, the refusal of
-// refresh tokens, a request to the real LEXIS API (expects an auth error, not a transport error),
+// (out/wasm/worker.js): startup, the bridge's methods without a LEXIS login, py4lexis renewing a
+// refresh token at LEXIS's Keycloak and a request to the real LEXIS API (both with made-up tokens:
+// they must fail with an authentication error, not a transport or import error),
 // and the bridge's Python unit tests inside Pyodide.
 //
 //   npm run compile && node qaas-wasm/smoke-test.mjs [wasm-dir]
 //
 // Needs Node 24+ (JSPI). Exit code 0 when everything passed.
 
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
@@ -83,7 +85,11 @@ const HANN = {
 };
 
 const checks = [
-  ["check", {}, (r) => r.result?.runtime === "wasm" && r.result.importable && !r.result.qaasOutdated],
+  [
+    "check",
+    {},
+    (r) => r.result?.runtime === "wasm" && r.result.importable && !r.result.qaasOutdated && r.result.packages.py4lexis,
+  ],
   ["analyze", { source: BELL }, (r) => r.result?.original?.twoQubitGates === 1],
   ["simulate", { sources: [BELL] }, (r) => Math.abs((r.result?.[0]?.["11"] ?? 0) - 0.5) < 1e-9],
   [
@@ -94,7 +100,9 @@ const checks = [
   [
     "whoami",
     { project: "p", token: jwt({ typ: "Refresh", exp, iss }) },
-    (r) => r.error?.type === "SignInRequired" && /WebAssembly runtime/.test(r.error.message),
+    (r) =>
+      r.error &&
+      !/ModuleNotFound|not installed|fetch failed|JSPI|SignInRequired/.test(`${r.error.type} ${r.error.message}`),
   ],
   [
     // Reaches LEXIS through fetch + JSPI; the made-up token must be refused by qaas/LEXIS, not by the transport.
@@ -127,5 +135,85 @@ try {
   failed++;
 }
 await worker.terminate();
+
+// Script mode (Run Python File on VLQ): output, input(), environment, matplotlib, exit code,
+// and a script with an import the bundle does not have.
+function runScript(source, inputs = []) {
+  const dir = mkdtempSync(join(tmpdir(), "qaas-smoke-"));
+  const file = join(dir, "script.py");
+  writeFileSync(file, source);
+  const input = new SharedArrayBuffer(8 + 65536);
+  const control = new Int32Array(input, 0, 2);
+  const w = new Worker(workerFile, {
+    workerData: { mode: "script", bundleDir, pythonDir: join(repo, "python"), input },
+  });
+  const result = { out: "", figures: [], dir };
+  return new Promise((done) => {
+    w.on("message", (m) => {
+      if (m.type === "ready") {
+        w.postMessage({
+          type: "run",
+          file,
+          args: ["x"],
+          env: { LEXIS_PROJECT: "p1" },
+          cwd: dir,
+          figuresDir: join(dir, "fig"),
+        });
+      } else if (m.type === "output") {
+        result.out += m.text;
+      } else if (m.type === "input") {
+        const bytes = new TextEncoder().encode(inputs.shift() ?? "");
+        new Uint8Array(input, 8).set(bytes);
+        Atomics.store(control, 1, bytes.length);
+        Atomics.store(control, 0, 1);
+        Atomics.notify(control, 0);
+      } else if (m.type === "figure") {
+        result.figures.push(m.path);
+      } else if (m.type === "exit" || m.type === "missing" || m.type === "fatal") {
+        Object.assign(result, m);
+        void w.terminate().then(() => done(result));
+      }
+    });
+  });
+}
+
+const scriptChecks = [
+  [
+    "script: env, argv, input(), qiskit, matplotlib, exit code",
+    `import os, sys
+from qiskit import QuantumCircuit
+from qiskit.primitives import StatevectorSampler
+import matplotlib.pyplot as plt
+name = input("name? ")
+qc = QuantumCircuit(2); qc.h(0); qc.cx(0, 1); qc.measure_all()
+counts = StatevectorSampler().run([qc], shots=200).result()[0].data.meas.get_counts()
+print("hello", name, os.environ["LEXIS_PROJECT"], sys.argv[1:], sorted(counts))
+plt.bar(list(counts), list(counts.values())); plt.show()
+sys.exit(3)
+`,
+    ["Ada\n"],
+    (r) =>
+      r.type === "exit" &&
+      r.code === 3 &&
+      /hello Ada p1 \['x'\] \['00', '11'\]/.test(r.out) &&
+      r.figures.length === 1 &&
+      readdirSync(join(r.dir, "fig")).length === 1,
+  ],
+  [
+    "script: missing import is reported before running",
+    "print('should not run')\nimport definitely_not_bundled\n",
+    [],
+    (r) => r.type === "missing" && r.modules[0].name === "definitely_not_bundled" && !r.out.includes("should not run"),
+  ],
+];
+for (const [title, source, inputs, ok] of scriptChecks) {
+  const t = Date.now();
+  const r = await runScript(source, inputs);
+  const pass = ok(r);
+  failed += pass ? 0 : 1;
+  console.log(
+    `${pass ? "ok  " : "FAIL"} ${title} (${((Date.now() - t) / 1000).toFixed(1)} s)${pass ? "" : `: ${JSON.stringify(r).slice(0, 400)}`}`,
+  );
+}
 console.log(failed ? `${failed} check(s) failed` : "all checks passed");
 process.exit(failed ? 1 : 0);

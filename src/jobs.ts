@@ -2,16 +2,27 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { Analysis } from "./analysis";
-import type { Bridge } from "./bridge";
-import { cfg, currentTarget, expandPath, lexisToken, requireProject, sanitize, type Target } from "./config";
+import { type Bridge, BridgeError } from "./bridge";
+import {
+  backendKeyName,
+  cfg,
+  currentTarget,
+  expandPath,
+  lexisToken,
+  requireProject,
+  sanitize,
+  type Target,
+} from "./config";
 import { instanceLabel, isJobId, type LexisInstance, normalizeInstance } from "./core/devEnv";
 import { formatSeconds } from "./core/estimate";
 import type { Counts } from "./core/stats";
+import { showError } from "./notify";
 import { ResultsPanel } from "./resultsPanel";
 import { ensureReady } from "./session";
 import { trustedSetting } from "./trust";
+import type { ScriptJob } from "./wasm/protocol";
 
-export const TERMINAL = new Set(["FINISHED", "FAILED", "CANCELED", "CANCELLED"]);
+export const TERMINAL = new Set(["FINISHED", "FAILED", "CANCELED", "CANCELLED", "DELETED"]);
 
 export interface JobRecord {
   jobId: string;
@@ -163,6 +174,8 @@ function stateIcon(state: string, pulse = false): vscode.ThemeIcon {
     case "CANCELED":
     case "CANCELLED":
       return new vscode.ThemeIcon("circle-slash");
+    case "DELETED":
+      return new vscode.ThemeIcon("trash");
     case "RUNNING":
       return new vscode.ThemeIcon("sync~spin");
     default:
@@ -358,10 +371,49 @@ export class JobManager implements vscode.Disposable {
     this.schedule();
   }
 
+  /** Background refresh of active jobs every qaas.jobPollSeconds, unless qaas.autoRefreshJobs is off. */
   schedule(): void {
     clearInterval(this.timer);
+    this.timer = undefined;
+    if (!cfg().get<boolean>("autoRefreshJobs", true)) {
+      return;
+    }
     const seconds = Math.max(5, cfg().get<number>("jobPollSeconds") ?? 20);
     this.timer = setInterval(() => void this.poll(false), seconds * 1000);
+  }
+
+  /** The Jobs view's toggle: turn the background refresh of active jobs on or off. */
+  async setAutoRefresh(on: boolean): Promise<void> {
+    await cfg().update("autoRefreshJobs", on, vscode.ConfigurationTarget.Global);
+    this.schedule();
+    vscode.window.setStatusBarMessage(
+      on ? "QaaS: active jobs are refreshed automatically" : "QaaS: automatic refresh of active jobs is off",
+      4000,
+    );
+    if (on) {
+      void this.poll(false);
+    }
+  }
+
+  /** A job a script submitted (WebAssembly runtime): tracked in the Jobs view from the start. */
+  async trackScriptJob(job: ScriptJob, target: Target, source: string): Promise<JobRecord> {
+    const rec: JobRecord = {
+      jobId: job.jobId,
+      name: job.name,
+      project: target.project,
+      resource: target.resource,
+      backend: backendKeyName(target),
+      state: "SUBMITTED",
+      submittedAt: new Date().toISOString(),
+      shots: job.shots ?? undefined,
+      circuits: job.kind === "circuit" ? job.tasks : undefined,
+      source,
+      kind: job.kind,
+      origin: "extension",
+      instance: target.instance,
+    };
+    await this.store.upsert(rec);
+    return this.store.get(rec.project, rec.jobId, rec.instance) ?? rec;
   }
 
   dispose(): void {
@@ -414,7 +466,7 @@ export class JobManager implements vscode.Disposable {
             continue;
           }
           if (userInitiated) {
-            vscode.window.showErrorMessage(`QaaS: could not refresh job ${r.jobId}: ${(e as Error).message}`);
+            showError(`QaaS: could not refresh job ${r.jobId}: ${(e as Error).message}`);
             break;
           }
         }
@@ -460,7 +512,8 @@ export class JobManager implements vscode.Disposable {
   }
 
   /** Download results; with openAfter the results view opens directly instead of a notification. */
-  async download(r: JobRecord, directory?: string, openAfter = false): Promise<JobRecord | undefined> {
+  /** Download results; `quiet` skips the "results saved" notification (the script run panel shows them). */
+  async download(r: JobRecord, directory?: string, openAfter = false, quiet = false): Promise<JobRecord | undefined> {
     directory ??= await this.defaultDirectory(r);
     if (!(await ensureReady(this.bridge, this.secrets, this.output))) {
       return undefined;
@@ -494,6 +547,9 @@ export class JobManager implements vscode.Disposable {
       }
       if (openAfter) {
         this.openResults(next, res.counts);
+        return next;
+      }
+      if (quiet) {
         return next;
       }
       const choice = await vscode.window.showInformationMessage(
@@ -585,7 +641,12 @@ export class JobManager implements vscode.Disposable {
       vscode.window.showInformationMessage(`QaaS: cancellation of #${r.jobId} requested.`);
       await this.poll(true);
     } catch (e) {
-      vscode.window.showErrorMessage(`QaaS: cancel failed: ${(e as Error).message}`);
+      const state = e instanceof BridgeError ? e.state : undefined;
+      if (state && state !== r.state) {
+        // HEAppE named the job's real state (e.g. DELETED): show it instead of the stale one.
+        await this.store.update(r, { state });
+      }
+      showError(`QaaS: cancel failed: ${(e as Error).message}`);
     }
   }
 
@@ -716,7 +777,7 @@ export class JobManager implements vscode.Disposable {
           name: j.name || `Job ${j.jobId}`,
           project: target.project,
           resource: j.resource || target.resource,
-          backend: target.backend,
+          backend: backendKeyName(target),
           instance: target.instance,
           state: j.state,
           circuits: j.tasks || undefined,
@@ -741,7 +802,7 @@ export class JobManager implements vscode.Disposable {
       if (opts.quiet) {
         throw e;
       }
-      vscode.window.showErrorMessage(`QaaS: import failed: ${(e as Error).message}`);
+      showError(`QaaS: import failed: ${(e as Error).message}`);
       return undefined;
     }
   }

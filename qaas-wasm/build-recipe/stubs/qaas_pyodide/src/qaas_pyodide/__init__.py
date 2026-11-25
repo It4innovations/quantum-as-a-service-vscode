@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import json as _json
+import re
 import sys
 import types
 from typing import Any
@@ -34,7 +35,7 @@ from urllib.parse import urlencode
 import aiohttp
 from yarl import URL
 
-__version__ = "0.1.1"
+__version__ = "0.1.5"
 __all__ = ["FetchClientSession", "install", "is_pyodide", "sync_api_available"]
 
 _installed = False
@@ -154,6 +155,30 @@ async def _encode_body(json_body: Any, data: Any, headers: dict[str, str]) -> by
     raise TypeError(f"Unsupported request body type for fetch: {type(data).__name__}")
 
 
+RETRIES = 2
+# Connection dropped or refused before the response was complete (Node/undici and browser wording).
+_RETRYABLE = re.compile(r"terminated|other side closed|ECONNRESET|socket hang up|UND_ERR_SOCKET|network error", re.I)
+
+
+def _js_error_text(e: BaseException) -> str:
+    """Message of a JS error and its cause (undici puts the socket error in ``cause``)."""
+    parts = []
+    err: Any = e
+    for _ in range(4):
+        name, message = getattr(err, "name", None), getattr(err, "message", None)
+        if message is None:
+            parts.append(str(err))
+            break
+        parts.append(f"{name}: {message}" if name else str(message))
+        err = getattr(err, "cause", None)
+        if err is None:
+            break
+        code = getattr(err, "code", None)
+        if code:
+            parts.append(str(code))
+    return " / ".join(dict.fromkeys(p for p in parts if p))
+
+
 def _timeout_seconds(timeout: Any) -> float | None:
     if timeout is None:
         return None
@@ -203,8 +228,7 @@ class FetchClientSession:
         if self.closed:
             raise aiohttp.ClientConnectionError("Session is closed")
         import js
-        from pyodide.ffi import JsException, to_js
-        from pyodide.http import pyfetch
+        from pyodide.ffi import to_js
 
         if params:
             items = params.items() if hasattr(params, "items") else params
@@ -212,26 +236,37 @@ class FetchClientSession:
             url = f"{url}{'&' if '?' in url else '?'}{query}"
         hdrs = {**self._headers, **(headers or {})}
         body = await _encode_body(json, data, hdrs)
-        opts: dict[str, Any] = {"method": method.upper(), "headers": hdrs}
-        if body is not None:
-            opts["body"] = to_js(body)
         seconds = _timeout_seconds(timeout) or _timeout_seconds(self._timeout)
-        if seconds:
-            opts["signal"] = js.AbortSignal.timeout(int(seconds * 1000))
-        try:
-            resp = await pyfetch(url, **opts)
-            raw = await resp.bytes()
-        except (JsException, OSError) as e:  # pyfetch wraps JS errors in AbortError(OSError)
-            if "timeout" in f"{e!r} {e}".lower() or "timed out" in str(e).lower():
-                raise TimeoutError(f"{method} {url} timed out after {seconds}s") from None
-            raise aiohttp.ClientConnectionError(
-                f"fetch failed for {url} (network error or CORS not allowed): {e}"
-            ) from None
+        # Requests that can be repeated are retried when the connection drops, e.g. a kept-alive
+        # connection the server closed while the response was read (Node: "TypeError: terminated").
+        attempts = RETRIES + 1 if method.upper() in ("GET", "HEAD", "OPTIONS") else 1
+        for attempt in range(attempts):
+            init: dict[str, Any] = {"method": method.upper(), "headers": hdrs}
+            if body is not None:
+                init["body"] = to_js(body)
+            signal = js.AbortSignal.timeout(int(seconds * 1000)) if seconds else None
+            if signal is not None:
+                init["signal"] = signal
+            try:
+                # js.fetch, not pyodide.http.pyfetch: pyfetch turns some failures into
+                # "'NoneType' object has no attribute 'message'" and loses the cause.
+                resp = await js.fetch(url, to_js(init, dict_converter=js.Object.fromEntries))
+                raw = (await resp.arrayBuffer()).to_bytes()
+                headers_out = js.Object.fromEntries(resp.headers.entries()).to_py()
+                break
+            except Exception as e:
+                if signal is not None and signal.aborted:
+                    raise TimeoutError(f"{method} {url} timed out after {seconds}s") from None
+                reason = _js_error_text(e)
+                if attempt + 1 < attempts and _RETRYABLE.search(reason):
+                    await asyncio.sleep(0.5 * (attempt + 1))
+                    continue
+                raise aiohttp.ClientConnectionError(f"{method} {url} failed: {reason}") from None
         return FetchResponse(
             resp.url or url,
             resp.status,
-            resp.status_text,
-            {k.lower(): v for k, v in dict(resp.headers).items()},
+            resp.statusText,
+            {str(k).lower(): str(v) for k, v in headers_out.items()},
             raw,
         )
 
@@ -318,6 +353,7 @@ def install() -> None:
     global _installed
     if _installed or not is_pyodide():
         return
+    _inline_thread_pools()  # before qheappe_client imports py4heappe and qiskit its primitives
     from qheappe_client import qclient
 
     qclient.aiohttp = _aiohttp_proxy()
@@ -328,4 +364,133 @@ def install() -> None:
     # keeps serving the request, so sync calls from async code (e.g. a handler entered with
     # callPromising) are safe. Without JSPI, PyodideLoopRunner.run raises a clear error anyway.
     qclient.QClient._check_sync_allowed = lambda self, coro: None
+    _no_browser_in_workers()
     _installed = True
+
+
+class InlineThreadPool:
+    """``multiprocessing.pool.ThreadPool`` stand-in that runs each task at once, in the caller.
+
+    py4heappe's ApiClient creates a ThreadPool in ``__init__`` and only uses it for
+    ``async_req=True`` calls. Pyodide has no threads and no ``_multiprocessing``, so the real pool
+    cannot even be created."""
+
+    def __init__(self, *_, **__):
+        pass
+
+    def apply_async(self, func, args=(), kwds=None, callback=None, error_callback=None):
+        return _Done(func, args, kwds or {}, callback, error_callback)
+
+    def apply(self, func, args=(), kwds=None):
+        return func(*args, **(kwds or {}))
+
+    def map(self, func, iterable, chunksize=None):
+        return [func(x) for x in iterable]
+
+    def close(self) -> None:
+        pass
+
+    def terminate(self) -> None:
+        pass
+
+    def join(self) -> None:
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _Done:
+    """AsyncResult of a task that already ran."""
+
+    def __init__(self, func, args, kwds, callback, error_callback):
+        self._error = None
+        try:
+            self._value = func(*args, **kwds)
+        except Exception as exc:
+            self._value, self._error = None, exc
+            if error_callback:
+                error_callback(exc)
+        else:
+            if callback:
+                callback(self._value)
+
+    def get(self, timeout=None):
+        if self._error is not None:
+            raise self._error
+        return self._value
+
+    def wait(self, timeout=None) -> None:
+        pass
+
+    def ready(self) -> bool:
+        return True
+
+    def successful(self) -> bool:
+        return self._error is None
+
+
+def _inline_thread_pools() -> None:
+    """Thread pools that run tasks inline: ``multiprocessing.pool.ThreadPool`` (py4heappe) and
+    ``concurrent.futures.ThreadPoolExecutor`` (qiskit primitives), for later imports and in modules
+    that already imported them."""
+    import concurrent.futures
+    import concurrent.futures.thread
+    import multiprocessing.pool
+
+    original = concurrent.futures.thread.ThreadPoolExecutor
+    multiprocessing.pool.ThreadPool = InlineThreadPool  # type: ignore[misc,assignment]
+    concurrent.futures.ThreadPoolExecutor = InlineExecutor  # type: ignore[misc,assignment]
+    concurrent.futures.thread.ThreadPoolExecutor = InlineExecutor  # type: ignore[misc,assignment]
+    for name, module in list(sys.modules.items()):
+        if name.startswith("py4heappe.") and name.endswith(".api_client") and hasattr(module, "ThreadPool"):
+            module.ThreadPool = InlineThreadPool
+        if getattr(module, "ThreadPoolExecutor", None) is original:
+            module.ThreadPoolExecutor = InlineExecutor
+
+
+class InlineExecutor:
+    """``concurrent.futures.ThreadPoolExecutor`` stand-in: each task runs at once, in the caller,
+    and its future is already done. Qiskit's primitives (StatevectorSampler, ...) submit every job
+    to a ThreadPoolExecutor; Pyodide cannot start threads."""
+
+    def __init__(self, *_, **__):
+        pass
+
+    def submit(self, fn, /, *args, **kwargs):
+        import concurrent.futures
+
+        future: concurrent.futures.Future = concurrent.futures.Future()
+        try:
+            future.set_result(fn(*args, **kwargs))
+        except BaseException as exc:
+            future.set_exception(exc)
+        return future
+
+    def map(self, fn, *iterables, timeout=None, chunksize=1):
+        return iter([fn(*args) for args in zip(*iterables, strict=False)])
+
+    def shutdown(self, wait=True, *, cancel_futures=False) -> None:
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _no_browser_in_workers() -> None:
+    """Pyodide's webbrowser.open uses window.open, which a worker (e.g. VS Code's) does not have.
+    Report "no browser" instead, as CPython does without one: py4lexis then only prints the login
+    URL, which the host shows to the user."""
+    import webbrowser
+
+    import js
+
+    if not hasattr(js, "window"):
+        webbrowser.open = lambda url, new=0, autoraise=True: False  # type: ignore[assignment]
+        webbrowser.open_new = webbrowser.open_new_tab = lambda url: False  # type: ignore[assignment]

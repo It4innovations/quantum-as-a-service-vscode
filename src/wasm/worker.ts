@@ -25,6 +25,7 @@ interface Manifest {
   qaas_version: string;
   pyodide_version: string;
   pyodide_packages: string[];
+  script_packages?: string[];
   mock_packages: Record<string, string>;
   wheels: string[];
   sha256: Record<string, string>;
@@ -42,15 +43,18 @@ interface EmscriptenFS {
 }
 interface Pyodide {
   FS: EmscriptenFS;
+  setStdout(opts: { write: (buffer: Uint8Array) => number }): void;
+  setStderr(opts: { write: (buffer: Uint8Array) => number }): void;
+  setStdin(opts: { stdin: () => string | null }): void;
   loadPackage(names: string[], opts?: { messageCallback?: (m: string) => void }): Promise<unknown>;
   runPythonAsync(code: string, opts?: { globals?: unknown }): Promise<unknown>;
   globals: { set(name: string, value: unknown): void };
 }
 
-const port = parentPort;
-if (!port) {
+if (!parentPort) {
   throw new Error("worker.ts must run in a worker thread");
 }
+const port = parentPort;
 const data = workerData as WasmWorkerData;
 const post = (msg: FromWorker) => port.postMessage(msg);
 const log = (text: string) => post({ type: "log", text });
@@ -132,7 +136,8 @@ function verifyWheels(m: Manifest): void {
   }
 }
 
-async function start(): Promise<PyProxy> {
+/** Pyodide with the bundle installed and host directories mounted; qaas_pyodide is installed. */
+async function loadRuntime(): Promise<{ py: Pyodide; manifest: Manifest; t0: number }> {
   const t0 = Date.now();
   if (typeof (globalThis as { WebAssembly?: { Suspending?: unknown } }).WebAssembly?.Suspending !== "function") {
     throw new Error(
@@ -160,8 +165,11 @@ async function start(): Promise<PyProxy> {
   py.FS.mount(py.FS.filesystems.NODEFS, { root: data.pythonDir }, "/qaas/python");
   post({ type: "status", text: `installing qaas ${manifest.qaas_version}` });
   py.globals.set("_qaas_manifest", JSON.stringify(manifest));
-  const handle = (await py.runPythonAsync(`
+  py.globals.set("_qaas_lexis_log", data.lexisLog ? (WINDOWS ? toWasmPath(data.lexisLog) : data.lexisLog) : "");
+  await py.runPythonAsync(`
 import json, os, sys, micropip
+if _qaas_lexis_log:
+    os.environ["QAAS_LEXIS_LOG"] = _qaas_lexis_log  # read when qaas_bridge is imported
 _m = json.loads(_qaas_manifest)
 for _name, _version in _m["mock_packages"].items():
     micropip.add_mock_package(_name, _version)
@@ -170,16 +178,23 @@ import qaas_pyodide
 qaas_pyodide.install()
 sys.path.insert(0, "/qaas/python")
 os.chdir("/")
-import qaas_bridge
-_server = qaas_bridge.Server()
-del _m, _qaas_manifest
-lambda line: qaas_bridge.handle(_server, line)
-`)) as PyProxy;
+del _m, _qaas_manifest, _qaas_lexis_log
+`);
   // Host directories last: the installation above writes to Pyodide's own /lib and /tmp. HOME only
   // now: Pyodide creates the HOME it starts with in memory, which would hide the host's directory.
   mountHost(py);
   py.globals.set("_qaas_home", WINDOWS ? toWasmPath(os.homedir()) : os.homedir());
   await py.runPythonAsync('os.environ["HOME"] = _qaas_home\ndel _qaas_home');
+  return { py, manifest, t0 };
+}
+
+async function start(): Promise<PyProxy> {
+  const { py, manifest, t0 } = await loadRuntime();
+  const handle = (await py.runPythonAsync(`
+import qaas_bridge
+_server = qaas_bridge.Server()
+lambda line: qaas_bridge.handle(_server, line)
+`)) as PyProxy;
   post({
     type: "ready",
     seconds: (Date.now() - t0) / 1000,
@@ -215,30 +230,125 @@ _qaas_run_tests`)) as PyProxy;
   }
 }
 
-// Requests are answered one at a time, in order, like the Python process.
-let queue: Promise<unknown> = Promise.resolve();
-const ready = start();
-ready.catch((e: Error) => post({ type: "fatal", message: e.message }));
+// ------------------------------------------------------------------------------- script mode
 
-port.on("message", (msg: ToWorker) => {
-  if (msg.type !== "request") {
-    return;
+/** input(): ask the host for a line and block this worker until it is in the shared buffer. */
+function stdinReader(shared: SharedArrayBuffer): () => string | null {
+  const control = new Int32Array(shared, 0, 2);
+  const bytes = new Uint8Array(shared, 8);
+  const decoder = new TextDecoder();
+  return () => {
+    Atomics.store(control, 0, 0);
+    post({ type: "input" });
+    Atomics.wait(control, 0, 0);
+    const length = Atomics.load(control, 1);
+    return length < 0 ? null : decoder.decode(bytes.slice(0, length));
+  };
+}
+
+function streamTo(stream: "out" | "err"): { write: (buffer: Uint8Array) => number } {
+  const decoder = new TextDecoder();
+  return {
+    write: (buffer) => {
+      const text = decoder.decode(buffer, { stream: true });
+      if (text) {
+        post({ type: "output", stream, text: WINDOWS ? text.replace(/\/mnt\/[a-z]\/\S*/g, toHostPath) : text });
+      }
+      return buffer.length;
+    },
+  };
+}
+
+/** Loads the runtime (and matplotlib) ahead, then runs the one script it is sent. */
+async function startScriptMode(): Promise<void> {
+  const { py, manifest, t0 } = await loadRuntime();
+  if (manifest.script_packages?.length) {
+    await py.loadPackage(manifest.script_packages, { messageCallback: () => {} });
   }
-  queue = queue.then(async () => {
-    let handle: PyProxy;
-    try {
-      handle = await ready;
-    } catch {
-      return; // reported as fatal
+  const runner = (await py.runPythonAsync(`
+import json, qaas_script
+def _qaas_run_script(request, notify_figure, notify_job):
+    r = json.loads(request)
+    found = qaas_script.check(r["file"])
+    if found["missing"]:
+        return json.dumps({"missing": found["missing"]})
+    code = qaas_script.run(r["file"], r["args"], r["env"], r["cwd"], r["figuresDir"], notify_figure, notify_job)
+    return json.dumps({"exit": code})
+_qaas_run_script`)) as PyProxy;
+  py.setStdout(streamTo("out"));
+  py.setStderr(streamTo("err"));
+  if (data.input) {
+    py.setStdin({ stdin: stdinReader(data.input) });
+  }
+  post({
+    type: "ready",
+    seconds: (Date.now() - t0) / 1000,
+    versions: { qaas: manifest.qaas_version, pyodide: manifest.pyodide_version },
+  });
+  port.once("message", async (msg: ToWorker) => {
+    if (msg.type !== "run") {
+      return;
     }
+    const request = JSON.stringify({
+      ...msg,
+      file: toWasmPath(msg.file),
+      cwd: toWasmPath(msg.cwd),
+      figuresDir: toWasmPath(msg.figuresDir),
+    });
     try {
-      const response = (await handle.callPromising(translate(msg.line, toWasmPath))) as string | undefined;
-      if (response) {
-        post({ type: "line", line: translate(response, toHostPath) });
+      const result = JSON.parse(
+        (await runner.callPromising(
+          request,
+          (p: string) => post({ type: "figure", path: toHostPath(p) }),
+          (job: string) => post({ type: "job", job: JSON.parse(job) }),
+        )) as string,
+      ) as { missing?: { name: string; line: number }[]; exit?: number };
+      if (result.missing) {
+        post({ type: "missing", modules: result.missing });
+      } else {
+        post({ type: "exit", code: result.exit ?? 0 });
       }
     } catch (e) {
-      // handle() turns Python exceptions into error responses; this is a Pyodide failure.
-      post({ type: "fatal", message: `WebAssembly runtime failed: ${(e as Error).message}` });
+      post({ type: "output", stream: "err", text: `${(e as Error).message}\n` });
+      post({ type: "exit", code: 1 });
     }
   });
-});
+}
+
+// -------------------------------------------------------------------------------- bridge mode
+
+if (data.mode === "script") {
+  startScriptMode().catch((e: Error) => post({ type: "fatal", message: e.message }));
+} else {
+  startBridgeMode();
+}
+
+function startBridgeMode(): void {
+  // Requests are answered one at a time, in order, like the Python process.
+  let queue: Promise<unknown> = Promise.resolve();
+  const ready = start();
+  ready.catch((e: Error) => post({ type: "fatal", message: e.message }));
+
+  port.on("message", (msg: ToWorker) => {
+    if (msg.type !== "request") {
+      return;
+    }
+    queue = queue.then(async () => {
+      let handle: PyProxy;
+      try {
+        handle = await ready;
+      } catch {
+        return; // reported as fatal
+      }
+      try {
+        const response = (await handle.callPromising(translate(msg.line, toWasmPath))) as string | undefined;
+        if (response) {
+          post({ type: "line", line: translate(response, toHostPath) });
+        }
+      } catch (e) {
+        // handle() turns Python exceptions into error responses; this is a Pyodide failure.
+        post({ type: "fatal", message: `WebAssembly runtime failed: ${(e as Error).message}` });
+      }
+    });
+  });
+}

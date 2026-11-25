@@ -7,10 +7,11 @@
 
 import * as vscode from "vscode";
 import type { Bridge } from "./bridge";
-import { currentTarget, lexisInstance, type Target } from "./config";
+import { backendKeyName, currentTarget, lexisInstance, type Target } from "./config";
 import { buildTable, type CalibrationMetrics, calibrationCsv } from "./core/calibration";
 import { nonce as makeNonce } from "./core/nonce";
 import type { JobStore } from "./jobs";
+import { showError } from "./notify";
 import type { OperatorCatalog } from "./operators";
 import { ensureReady } from "./session";
 
@@ -177,7 +178,7 @@ type Node =
 export class CalibrationsTreeProvider implements vscode.TreeDataProvider<Node> {
   private readonly changed = new vscode.EventEmitter<void>();
   readonly onDidChangeTreeData = this.changed.event;
-  private backend = "VLQ";
+  private backend = "";
 
   constructor(
     private readonly store: CalibrationStore,
@@ -194,7 +195,7 @@ export class CalibrationsTreeProvider implements vscode.TreeDataProvider<Node> {
     if (node) {
       return [];
     }
-    this.backend = (await currentTarget(this.secrets)).backend;
+    this.backend = backendKeyName(await currentTarget(this.secrets));
     const sets = this.store.known(this.backend);
     if (sets.length === 0) {
       return [
@@ -338,7 +339,7 @@ class CalibrationPanel {
           await this.update();
         } catch (e) {
           this.compareId = undefined;
-          vscode.window.showErrorMessage(`QaaS: ${(e as Error).message}`);
+          showError(`QaaS: ${(e as Error).message}`);
           await this.update();
         } finally {
           this.busy(false);
@@ -473,8 +474,10 @@ export class CalibrationCommands {
     return this.store.current();
   }
 
+  /** Target whose backend names the calibration sets (the backend in use when none is configured). */
   private async target(): Promise<Target> {
-    return currentTarget(this.context.secrets);
+    const t = await currentTarget(this.context.secrets);
+    return { ...t, backend: backendKeyName(t) };
   }
 
   async knownSets() {
@@ -529,7 +532,7 @@ export class CalibrationCommands {
       if (quiet) {
         throw e;
       }
-      vscode.window.showErrorMessage(`QaaS: ${(e as Error).message}`);
+      showError(`QaaS: ${(e as Error).message}`);
       return undefined;
     }
   }
@@ -554,7 +557,7 @@ export class CalibrationCommands {
         panel.setCompare(compareWith);
       }
     } catch (e) {
-      vscode.window.showErrorMessage(`QaaS: ${(e as Error).message}`);
+      showError(`QaaS: ${(e as Error).message}`);
     }
   }
 

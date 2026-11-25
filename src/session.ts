@@ -7,7 +7,8 @@ import * as vscode from "vscode";
 import { type Bridge, currentRuntime } from "./bridge";
 import { currentTarget, devEnvPath, devOverrides, lexisInstance, lexisToken } from "./config";
 import { instanceLabel, PRODUCTION_AAI_URL, sameInstance, tokenKey } from "./core/devEnv";
-import { createEnvironment, installQaas, selectInterpreter } from "./environments";
+import { createEnvironment, installQaas, QAAS_VERSION, selectInterpreter } from "./environments";
+import { showError } from "./notify";
 import { currentAuthMode, signInWithWorkflows } from "./workflows";
 
 export interface CheckData {
@@ -69,7 +70,7 @@ function problemOf(d: CheckData): string | undefined {
     return `QaaS: qaas is not installed in ${d.executable}${d.importError ? ` (${d.importError})` : ""}.`;
   }
   if (d.qaasOutdated) {
-    return `QaaS: qaas ${d.packages.qaas} is older than 1.0.0.`;
+    return `QaaS: qaas ${d.packages.qaas} is older than ${QAAS_VERSION}.`;
   }
   return undefined;
 }
@@ -140,23 +141,17 @@ export async function signIn(
     return signInThroughWorkflows(bridge, secrets, output);
   }
   const name = lexisName();
-  const wasm = currentRuntime() === "wasm";
   const items: (vscode.QuickPickItem & { choice: SignInChoice })[] = [
-    ...(wasm
-      ? []
-      : [
-          {
-            choice: "browser" as const,
-            label: "$(globe) Log in with the browser",
-            detail: "Opens the LEXIS login page. The session lasts until VS Code closes.",
-          },
-        ]),
+    {
+      choice: "browser",
+      label: "$(globe) Log in with the browser",
+      detail: "Opens the LEXIS login page. The session lasts until VS Code closes.",
+    },
     {
       choice: "token",
-      label: wasm ? "$(key) Paste an access token" : "$(key) Paste a token",
-      detail: wasm
-        ? "Expires in minutes. The WebAssembly runtime (qaas.runtime) cannot log in with the browser or renew refresh tokens; turn on qaas.workflowsIntegration to sign in through IT4I Workflows."
-        : "A refresh/offline token (renewed automatically) or an access token (expires in minutes). Stored in VS Code secret storage.",
+      label: "$(key) Paste a token",
+      detail:
+        "A refresh/offline token (renewed automatically) or an access token (expires in minutes). Stored in VS Code secret storage.",
     },
     {
       choice: "devFile",
@@ -206,11 +201,7 @@ export async function pasteToken(
   const server = instance?.aaiUrl ?? instance?.apiUrl ?? PRODUCTION_AAI_URL;
   const token = await vscode.window.showInputBox({
     title: `${name} token`,
-    prompt: `${
-      currentRuntime() === "wasm"
-        ? "Access token (the WebAssembly runtime cannot renew refresh tokens)"
-        : "Refresh/offline token (recommended) or access token"
-    }${
+    prompt: `Refresh/offline token (recommended) or access token${
       instance
         ? `. It will be sent to ${server} (non-production instance from ${
             devOverrides().PY4LEXIS_AAI_URL || devOverrides().PY4LEXIS_API_URL ? devEnvPath() : "settings"
@@ -265,7 +256,7 @@ async function signInThroughWorkflows(
     return true;
   } catch (e) {
     output.appendLine(`[session] IT4I Workflows sign-in check failed: ${(e as Error).message}`);
-    vscode.window.showErrorMessage(`QaaS: the IT4I Workflows sign-in did not work: ${(e as Error).message}`);
+    showError(`QaaS: the IT4I Workflows sign-in did not work: ${(e as Error).message}`);
     return false;
   }
 }
@@ -281,7 +272,9 @@ async function verifySignIn(
     const me = await vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Notification,
-        title: pastedToken ? `QaaS: signing in to ${name}…` : `QaaS: waiting for the ${name} login in the browser…`,
+        title: pastedToken
+          ? `QaaS: signing in to ${name}…`
+          : `QaaS: waiting for you to sign in to ${name} in the browser (Open Login Page)…`,
         cancellable: true,
       },
       async (_p, token) => bridge.call<WhoAmI>("whoami", await currentTarget(secrets), {}, token),
@@ -294,7 +287,7 @@ async function verifySignIn(
     if (pastedToken) {
       await secrets.delete(tokenKey(lexisInstance()));
     }
-    vscode.window.showErrorMessage(`QaaS: sign-in to ${name} failed: ${(e as Error).message}`);
+    showError(`QaaS: sign-in to ${name} failed: ${(e as Error).message}`);
     return false;
   }
 }

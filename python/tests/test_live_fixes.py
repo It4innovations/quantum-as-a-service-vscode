@@ -76,6 +76,33 @@ class CancelTests(unittest.TestCase):
         with self.assertRaises(qaas_bridge.BridgeError):
             FakeServer(self._qclient(False)).cancel({**TARGET, "jobId": "7"})
 
+    def test_refusal_carries_heappe_reason_and_state(self):
+        import logging
+
+        try:  # qaas's own module logger (outside the logging hierarchy), as in the real refusal
+            from qheappe_client.qclient import log as qclient_log
+        except ImportError:
+            qclient_log = logging.getLogger("qheappe_client.qclient")
+
+        async def cancel_job(job_id):
+            qclient_log.error(
+                "Failed to cancel job %s: %s",
+                job_id,
+                'PUT https://x/heappe/JobManagement/CancelJob -> HTTP 400: {"title":"Invalid Request","status":400,'
+                "\"detail\":\"Cannot cancel job '3751', this job is in state 'Deleted'. (Request ID: c28d577)\"}",
+            )
+            return False
+
+        qclient = self._qclient(False)
+        qclient.cancel_job = cancel_job
+        with self.assertRaises(qaas_bridge.CancelRefused) as ctx:
+            FakeServer(qclient).cancel({**TARGET, "jobId": "3751"})
+        self.assertEqual(
+            str(ctx.exception),
+            "HEAppE did not accept cancelling job 3751: Cannot cancel job '3751', this job is in state 'Deleted'.",
+        )
+        self.assertEqual(ctx.exception.state, "DELETED")
+
 
 class PulseDownloadTests(unittest.TestCase):
     def test_pulse_job_submitted_elsewhere_is_rebuilt_from_raw_readouts(self):
@@ -215,10 +242,60 @@ class MissingCircuitResultsTests(unittest.TestCase):
             "Failed to fetch task artifact 'measurement_counts': GET https://x/heappe/QScheduler/GetTaskArtifact "
             "-> HTTP 404: QSchedulerResourceNotFound"
         )
-        server._job = lambda p: job
+        server._job = lambda p, memory=False: job
         with self.assertRaises(qaas_bridge.BridgeError) as ctx:
             server.download({**TARGET, "jobId": "134", "shots": 1000, "directory": "/tmp/x"})
         self.assertIn("pulse-level job", str(ctx.exception))
+
+
+class JobStateTests(unittest.TestCase):
+    def test_state_256_is_the_final_deleted_state(self):
+        try:
+            import qheappe_client.utils  # noqa: F401
+        except ImportError:
+            self.skipTest("qaas not installed")
+        self.assertEqual(qaas_bridge._job_state(256), "DELETED")
+        self.assertIn("DELETED", qaas_bridge.TERMINAL_STATES)
+        self.assertEqual(qaas_bridge._job_state(16), "FINISHED")
+        self.assertIn("Unknown", qaas_bridge._job_state(512))
+
+
+class DownloadTests(unittest.TestCase):
+    """qaas 1.1 removed the arguments of QJob.result(); per-shot results come from QJob(memory=True)."""
+
+    def test_download_uses_the_qjob_api_of_the_installed_qaas(self):
+        try:
+            from qheappe_client.qiskit.qbackend import QJob
+        except ImportError:
+            self.skipTest("qaas not installed")
+        import inspect
+        import tempfile
+
+        self.assertEqual(list(inspect.signature(QJob.result).parameters), ["self"])
+        self.assertIn("memory", inspect.signature(QJob.__init__).parameters)
+        created = {}
+
+        class Result:
+            def get_counts(self):
+                return {"00": 3, "11": 1}
+
+            def get_memory(self, _i=0):
+                return ["00", "11", "00", "00"]
+
+        class Job:
+            def __init__(self):
+                self._cached_raw_results = {"1": {}}
+
+            def result(self):  # no arguments, as in qaas 1.1
+                return Result()
+
+        server = qaas_bridge.Server()
+        server.jobInfo = lambda p: {"state": "FINISHED"}
+        server._job = lambda p, memory=False: created.update(memory=memory) or Job()
+        with tempfile.TemporaryDirectory() as d:
+            out = server.download({**TARGET, "jobId": "1", "shots": 4, "directory": d, "withMeasurements": True})
+        self.assertEqual(created, {"memory": True})
+        self.assertEqual(out["counts"], [{"00": 3, "11": 1}])
 
 
 class PulseRawReadoutTests(unittest.TestCase):
@@ -246,6 +323,81 @@ class PulseRawReadoutTests(unittest.TestCase):
         server = FakeServer(types.SimpleNamespace(job_management_api=api))
         server._heappe_user_id = lambda qclient: None
         self.assertEqual(server.listJobs({**TARGET, "limit": 5})[0]["kind"], "pulse")
+
+
+class VersionTests(unittest.TestCase):
+    def test_qaas_older_than_the_supported_release_is_outdated(self):
+        cases = [("1.0.1", True), ("1.1.0a1", True), ("1.1.0", False), ("1.2.0", False), (None, False)]
+        for version, outdated in cases:
+            self.assertEqual(qaas_bridge._is_outdated(version), outdated, version)
+
+
+class NativeQasmTests(unittest.TestCase):
+    """IQM-native OpenQASM (VLQ's move gate, as in a transpiled export) parses; qaas will handle it later."""
+
+    def setUp(self):
+        try:
+            from iqm.qiskit_iqm.move_gate import MoveGate
+        except ImportError:
+            self.skipTest("iqm-client not installed")
+        from qiskit import QuantumCircuit
+        from qiskit.circuit.library import RGate
+
+        self.MoveGate, self.RGate = MoveGate, RGate
+        qc = QuantumCircuit(3, 2)
+        qc.append(RGate(0.5, 0.1), [0])
+        qc.append(MoveGate(), [0, 2])
+        qc.cz(1, 2)
+        qc.append(MoveGate(), [0, 2])
+        qc.measure([0, 1], [0, 1])
+        self.exported = qaas_bridge._dumps_qasm3(qc)
+
+    def test_transpiled_export_round_trips_with_native_gates(self):
+        self.assertIn("move q[0], q[2];", self.exported)
+        circuit = qaas_bridge._load_qasm(self.exported)
+        ops = [inst.operation for inst in circuit.data]
+        self.assertEqual(sum(isinstance(o, self.MoveGate) for o in ops), 2)
+        self.assertEqual(sum(isinstance(o, self.RGate) for o in ops), 1)
+        self.assertEqual(qaas_bridge.Server().analyze({"source": self.exported})["original"]["ops"]["move"], 2)
+
+    def test_line_numbers_stay_right(self):
+        broken = self.exported.replace("cz q[1], q[2];", "cz q[1] q[2];")
+        with self.assertRaises(qaas_bridge.BridgeError) as ctx:
+            qaas_bridge.Server().analyze({"source": broken})
+        line = next(i for i, t in enumerate(broken.splitlines(), 1) if "cz q[1] q[2]" in t)
+        self.assertIn(f"line {line},", str(ctx.exception))
+
+
+class ParseErrorTests(unittest.TestCase):
+    """The openqasm3 parser raises an empty error; the bridge reports the offending token's position."""
+
+    def analyze_error(self, source: str) -> str:
+        with self.assertRaises(qaas_bridge.BridgeError) as ctx:
+            qaas_bridge.Server().analyze({"source": source})
+        return str(ctx.exception)
+
+    def test_reports_line_and_column(self):
+        src = 'OPENQASM 3.0;\ninclude "stdgates.inc";\nqubit[2] q;\nh q[0];\ncx q[0] q[1];\n'
+        self.assertIn("line 5, column 8: unexpected 'q'", self.analyze_error(src))
+
+    def test_reports_end_of_file(self):
+        error = self.analyze_error("OPENQASM 3.0;\nqubit[2] q;\nh q[0]")
+        self.assertIn("line 3, column 6: unexpected end of file", error)
+
+
+class HeappeClientTests(unittest.TestCase):
+    """qaas builds a py4heappe ApiClient for every HEAppE call; in Pyodide its ThreadPool needs the adapter."""
+
+    def test_heappe_api_client_can_be_created(self):
+        try:
+            from py4heappe.heappe_v6.core import ApiClient, Configuration
+        except ImportError:
+            self.skipTest("py4heappe not installed")
+        conf = Configuration()
+        conf.host = "https://heappe.example.org"
+        client = ApiClient(conf, header_name="Authorization", header_value="Bearer x")
+        self.assertEqual(client.default_headers["Authorization"], "Bearer x")
+        client.pool.close()
 
 
 if __name__ == "__main__":

@@ -1,22 +1,24 @@
 import * as assert from "node:assert/strict";
 import { test } from "node:test";
-import { estimate, formatRange } from "../../core/estimate";
+import { BILLING_MODELS, billingModel, estimate, formatRange } from "../../core/estimate";
 import { nonce } from "../../core/nonce";
 import { scanRunCalls } from "../../core/runScanner";
+
+const VLQ = BILLING_MODELS[0];
 
 const close = (a: number, b: number) => assert.ok(Math.abs(a - b) < 1e-9, `${a} != ${b}`);
 
 test("estimate matches the examples in the VLQ consumption guide", () => {
-  close(estimate({ shots: 1000, circuits: 4, circuitUs: 50 }).high, 3.6);
-  close(estimate({ shots: 10000, submissions: 3, circuitUs: 50 }).high, 12.0);
-  close(estimate({ shots: 10000, circuitUs: 20 }).high, 3.7);
+  close(estimate({ shots: 1000, circuits: 4, circuitUs: 50 }, VLQ).high, 3.6);
+  close(estimate({ shots: 10000, submissions: 3, circuitUs: 50 }, VLQ).high, 12.0);
+  close(estimate({ shots: 10000, circuitUs: 20 }, VLQ).high, 3.7);
 });
 
 test("estimate gives a 0-50 us range and the 0.9 s minimum", () => {
-  const e = estimate({ shots: 10000 });
+  const e = estimate({ shots: 10000 }, VLQ);
   close(e.low, 3.5);
   close(e.high, 4.0);
-  const small = estimate({ shots: 100 });
+  const small = estimate({ shots: 100 }, VLQ);
   close(small.high, 0.9);
   assert.equal(small.minimumApplies, true);
   assert.equal(formatRange(small), "0.90 s");
@@ -135,4 +137,28 @@ test("webview nonces are random base64 of 128 bits", () => {
   for (const n of seen) {
     assert.match(n, /^[A-Za-z0-9+/]{22}==$/);
   }
+});
+
+test("calls mentioned in comments, strings and docstrings are not submissions", () => {
+  const script = [
+    '"""Docstring: run with backend.run(qc, shots=10)."""',
+    "job = backend.run(qc, shots=1024)",
+    'print("Counts:", result.get_counts())  # per-shot: backend.run(..., memory=True)',
+    "# backend.run(qc, shots=5)",
+    "msg = 'use backend.run(qc)' + \"x\"",
+    "s = '''multi",
+    "backend.run(qc)'''",
+  ].join("\n");
+  assert.deepEqual(
+    scanRunCalls(script).map((c) => [c.line, c.shots]),
+    [[1, 1024]],
+  );
+});
+
+test("billing models are looked up by backend; unknown backends have none", () => {
+  assert.equal(billingModel("VLQ")?.backend, "VLQ");
+  assert.equal(billingModel("vlq")?.backend, "VLQ");
+  assert.equal(billingModel("EQE"), undefined);
+  assert.equal(billingModel(undefined), undefined);
+  assert.equal(billingModel(""), undefined);
 });
