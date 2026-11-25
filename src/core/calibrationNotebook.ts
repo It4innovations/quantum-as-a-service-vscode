@@ -5,7 +5,7 @@
  */
 
 import type { LexisInstance } from "./devEnv";
-import { estimate, formatSeconds } from "./estimate";
+import { type BillingModel, estimate, formatSeconds } from "./estimate";
 import { CALIBRATION_RESULT_SCHEMA } from "./operators";
 
 export interface CalibrationNotebookInput {
@@ -19,6 +19,8 @@ export interface CalibrationNotebookInput {
   resultDirectory: string;
   /** Non-production LEXIS instance (e.g. the test instance); undefined for production. */
   instance?: LexisInstance;
+  /** Billing model of the backend; without one the notebook states no cost. */
+  billing?: BillingModel;
 }
 
 /** Rounds of the Rabi calibration: (span relative to start amplitude, points, shots). */
@@ -31,10 +33,10 @@ export const CHECK_SHOTS = 2000;
 /** X and X·X with the custom and the native gate. */
 export const CHECK_JOBS = 4;
 
-/** Worst-case billed seconds, counting every sweep point as one VLQ job. */
-export function calibrationCost(): number {
-  const rounds = RABI_ROUNDS.reduce((a, [, points, shots]) => a + estimate({ shots, circuits: points }).high, 0);
-  return rounds + estimate({ shots: CHECK_SHOTS, circuits: CHECK_JOBS }).high;
+/** Worst-case billed seconds, counting every sweep point as one job. */
+export function calibrationCost(model: BillingModel): number {
+  const rounds = RABI_ROUNDS.reduce((a, [, points, shots]) => a + estimate({ shots, circuits: points }, model).high, 0);
+  return rounds + estimate({ shots: CHECK_SHOTS, circuits: CHECK_JOBS }, model).high;
 }
 
 const py = (s: string) => JSON.stringify(s);
@@ -56,8 +58,10 @@ function instanceLines(instance?: LexisInstance): string {
 }
 
 export function buildCalibrationNotebook(i: CalibrationNotebookInput): string {
-  const cost = formatSeconds(calibrationCost());
   const jobs = RABI_ROUNDS.length + CHECK_JOBS;
+  const cost = i.billing
+    ? ` Estimated billed time: up to ${formatSeconds(calibrationCost(i.billing))} (every sweep point counted as one job).`
+    : "";
   const cells: { cell_type: "markdown" | "code"; source: string }[] = [
     {
       cell_type: "markdown",
@@ -68,7 +72,7 @@ then checks X (expect P(1) ≈ 1) and X·X (expect P(1) ≈ 0) against the nativ
 The last cell writes a calibration result to \`.qaas/calibrations/\`; VS Code then offers to save it in the operator file
 for the current calibration set.
 
-Runs ${jobs} pulse-level jobs. Estimated billed time: up to ${cost} (every sweep point counted as one VLQ job).
+Runs ${jobs} pulse-level jobs.${cost}
 Workflow from the qaas example \`pulse_level_custom_x_gate.ipynb\` (after Filippos Dakis, Experimental_results_IQM).
 Needs \`qaas[iqm_qiskit]\`, \`matplotlib\`, QScheduler with pulse access, HEAppE 6.7.0+.`,
     },

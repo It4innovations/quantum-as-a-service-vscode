@@ -4,12 +4,17 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { cfg } from "./config";
+import { showError } from "./notify";
 import { resolvePython } from "./python";
 import { approveExecutable, trustedSetting } from "./trust";
 
 /** qaas supports exactly this Python minor version (requires-python >=3.12,<3.13). */
 export const REQUIRED_PYTHON = "3.12";
-export const QAAS_REQUIREMENT = ">=1.0.0,<2";
+/** The qaas version QaaS is built and tested with; also bundled in the WebAssembly runtime. */
+export const QAAS_VERSION = "1.1.0";
+export const QAAS_REQUIREMENT = `==${QAAS_VERSION}`;
+/** IT4I's package index: qaas needs py4lexis, which is published there, not on PyPI. */
+export const IT4I_INDEX = "https://opencode.it4i.eu/api/v4/projects/107/packages/pypi/simple";
 
 export type EnvKind = "venv" | "conda" | "pyenv" | "system";
 
@@ -358,7 +363,7 @@ export async function createEnvironment(known?: PyEnv[]): Promise<string | undef
     items.push({ label: `$(package) conda env with Python ${REQUIRED_PYTHON}`, detail: conda, make: "conda" });
   }
   if (items.length === 0) {
-    vscode.window.showErrorMessage(
+    showError(
       `QaaS: no Python ${REQUIRED_PYTHON} found and no conda. Install Python ${REQUIRED_PYTHON} (e.g. \`pyenv install ${REQUIRED_PYTHON}\`) or Miniconda, then try again.`,
     );
     return undefined;
@@ -382,7 +387,7 @@ export async function createEnvironment(known?: PyEnv[]): Promise<string | undef
       dir = chosen.fsPath;
     }
     if ((await runTask("Create venv", pick.base!.python, ["-m", "venv", dir])) !== 0) {
-      vscode.window.showErrorMessage("QaaS: creating the virtual environment failed. See the terminal.");
+      showError("QaaS: creating the virtual environment failed. See the terminal.");
       return undefined;
     }
     python = venvPython(dir);
@@ -399,13 +404,13 @@ export async function createEnvironment(known?: PyEnv[]): Promise<string | undef
       (await runTask("Create conda env", conda!, ["create", "-y", "-n", name, `python=${REQUIRED_PYTHON}`, "pip"])) !==
       0
     ) {
-      vscode.window.showErrorMessage("QaaS: creating the conda environment failed. See the terminal.");
+      showError("QaaS: creating the conda environment failed. See the terminal.");
       return undefined;
     }
     const out = await run(conda!, ["env", "list", "--json"]);
     const prefix = ((JSON.parse(out ?? "{}").envs ?? []) as string[]).find((p) => path.basename(p) === name);
     if (!prefix) {
-      vscode.window.showErrorMessage(`QaaS: conda env "${name}" was not found after creation.`);
+      showError(`QaaS: conda env "${name}" was not found after creation.`);
       return undefined;
     }
     python = pythonIn(prefix);
@@ -424,7 +429,7 @@ export async function installQaas(python?: string): Promise<boolean> {
   const exe = python ?? (await resolvePython());
   const info = await probe(exe);
   if (!info.version) {
-    const c = await vscode.window.showErrorMessage(`QaaS: cannot run ${exe}.`, "Select Interpreter");
+    const c = await showError(`QaaS: cannot run ${exe}.`, "Select Interpreter");
     if (c) {
       await selectInterpreter();
     }
@@ -463,6 +468,8 @@ export async function installQaas(python?: string): Promise<boolean> {
     "pip",
     "install",
     "--upgrade",
+    "--extra-index-url",
+    IT4I_INDEX,
     `qaas[${extra}]${QAAS_REQUIREMENT}`,
   ]);
   if (code === 0) {
@@ -470,6 +477,6 @@ export async function installQaas(python?: string): Promise<boolean> {
     void vscode.commands.executeCommand("qaas.restartBridge");
     return true;
   }
-  vscode.window.showErrorMessage("QaaS: pip install failed. See the terminal for details.");
+  showError("QaaS: pip install failed. See the terminal for details.");
   return false;
 }

@@ -1,0 +1,10 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "qiskit-aer"
+version = "0.17.2+wasmstub"
+description = "Import-only stub of qiskit-aer for Pyodide/WASM builds of qaas. Simulation is not available."
+requires-python = ">=3.9"
+[tool.setuptools.packages.find]
+where = ["src"]

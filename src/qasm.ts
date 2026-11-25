@@ -1,11 +1,12 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
 import type { Bridge } from "./bridge";
-import { cfg, currentTarget, requireProject } from "./config";
-import { estimate, formatRange } from "./core/estimate";
+import { backendKeyName, backendLabel, backendName, cfg, currentTarget, requireProject } from "./config";
+import { billingModel, estimate, formatRange } from "./core/estimate";
 import { type CalibrationEntry, parseOperatorDirectives, pickEntry, shapeOnly } from "./core/operators";
 import { isQasm } from "./estimateLens";
 import type { JobManager, JobRecord } from "./jobs";
+import { showError } from "./notify";
 import { type OperatorCatalog, shortId } from "./operators";
 import { ensureReady } from "./session";
 
@@ -78,7 +79,12 @@ export class QasmCommands {
   }
 
   private async docFor(uri?: vscode.Uri): Promise<vscode.TextDocument | undefined> {
-    const doc = uri ? await vscode.workspace.openTextDocument(uri) : vscode.window.activeTextEditor?.document;
+    let doc = uri ? await vscode.workspace.openTextDocument(uri) : vscode.window.activeTextEditor?.document;
+    if (doc?.uri.scheme === TRANSPILED_SCHEME && doc.uri.query) {
+      // The transpiled side of the diff: run the source file (it is transpiled again on submit),
+      // not backend-native QASM (e.g. IQM's `move`), which qaas cannot parse yet.
+      doc = await vscode.workspace.openTextDocument(vscode.Uri.parse(doc.uri.query));
+    }
     if (!doc || !isQasm(doc)) {
       vscode.window.showWarningMessage("QaaS: open an OpenQASM 3 (.qasm) file.");
       return undefined;
@@ -175,18 +181,18 @@ export class QasmCommands {
     try {
       info = await this.catalog.ensurePulseInfo();
     } catch (e) {
-      vscode.window.showErrorMessage(`QaaS: could not read the current calibration set: ${(e as Error).message}`);
+      showError(`QaaS: could not read the current calibration set: ${(e as Error).message}`);
       return undefined;
     }
     const plan: PulsePlan = { operators: [], use, used: [] };
     for (const [gate, name] of Object.entries(use)) {
       const op = this.catalog.byName(name);
       if (!op) {
-        vscode.window.showErrorMessage(`QaaS: no operator "${name}" in .qaas/operators.`);
+        showError(`QaaS: no operator "${name}" in .qaas/operators.`);
         return undefined;
       }
       if ((op.spec.gate ?? "prx") !== gate) {
-        vscode.window.showErrorMessage(`QaaS: operator "${name}" implements ${op.spec.gate}, not ${gate}.`);
+        showError(`QaaS: operator "${name}" implements ${op.spec.gate}, not ${gate}.`);
         return undefined;
       }
       let cal = op.spec.calibrations?.find((c) => c.calibrationSetId === info.calibrationSetId);
@@ -276,7 +282,7 @@ export class QasmCommands {
         `QaaS: depth ${o.depth} → ${t.depth} · 2-qubit gates ${o.twoQubitGates} → ${t.twoQubitGates} · layout ${layout}`,
       );
     } catch (e) {
-      vscode.window.showErrorMessage(`QaaS: transpile failed: ${(e as Error).message}`);
+      showError(`QaaS: transpile failed: ${(e as Error).message}`);
     }
   }
 
@@ -307,9 +313,7 @@ export class QasmCommands {
       for (const d of docs) {
         for (const [gate, name] of Object.entries(parseOperatorDirectives(d.getText()).use)) {
           if (use[gate] && use[gate] !== name) {
-            vscode.window.showErrorMessage(
-              `QaaS: the selected files ask for different ${gate} operators (${use[gate]}, ${name}).`,
-            );
+            showError(`QaaS: the selected files ask for different ${gate} operators (${use[gate]}, ${name}).`);
             return;
           }
           use = { ...use, [gate]: name };
@@ -324,16 +328,20 @@ export class QasmCommands {
       ? `\nPulse level: ${pulse.used.map((u) => `${u.gate}=${u.name} (set ${shortId(u.calibrationSetId)}, ${u.status})`).join(", ")}`
       : "";
     const target = await currentTarget(this.secrets);
+    const model = billingModel(backendName());
     const defaultShots = cfg().get<number>("defaultShots") ?? 1024;
     const shotsText = await vscode.window.showInputBox({
-      title: `Run ${docs.length === 1 ? path.basename(docs[0].fileName) : `${docs.length} circuits`} on ${target.backend}`,
+      title: `Run ${docs.length === 1 ? path.basename(docs[0].fileName) : `${docs.length} circuits`} on ${backendLabel()}`,
       prompt: "Shots per circuit",
       value: String(defaultShots),
       validateInput: (v) => {
         if (!/^\d+$/.test(v) || Number(v) < 1) {
           return "Enter a positive whole number";
         }
-        const e = estimate({ shots: Number(v), circuits: docs.length });
+        if (!model) {
+          return undefined;
+        }
+        const e = estimate({ shots: Number(v), circuits: docs.length }, model);
         return {
           message: `Estimated billed time: ${formatRange(e)}`,
           severity: vscode.InputBoxValidationSeverity.Info,
@@ -345,7 +353,7 @@ export class QasmCommands {
       return;
     }
     const shots = Number(shotsText);
-    const est = estimate({ shots, circuits: docs.length });
+    const est = model ? estimate({ shots, circuits: docs.length }, model) : undefined;
     const defaultName = docs.length === 1 ? path.basename(docs[0].fileName, ".qasm") : `batch_${docs.length}_circuits`;
     const jobName = await vscode.window.showInputBox({ title: "Job name", value: defaultName, ignoreFocusOut: true });
     if (jobName === undefined) {
@@ -353,12 +361,14 @@ export class QasmCommands {
     }
     if (cfg().get<boolean>("confirmSubmit", true)) {
       const ok = await vscode.window.showInformationMessage(
-        `Submit "${jobName}" to ${target.backend}?`,
+        `Submit "${jobName}" to ${backendLabel()}?`,
         {
           modal: true,
           detail:
             `${docs.length} circuit${docs.length === 1 ? "" : "s"} × ${shots.toLocaleString()} shots\n` +
-            `Estimated billed QPU time: ${formatRange(est)} (${est.vlqJobs} VLQ job${est.vlqJobs === 1 ? "" : "s"})\n` +
+            (est
+              ? `Estimated billed QPU time: ${formatRange(est)} (${est.jobs} job${est.jobs === 1 ? "" : "s"})\n`
+              : `No billing model is known for ${backendLabel()}; the cost cannot be estimated.\n`) +
             `Project ${target.project}${target.resource ? `, resource ${target.resource}` : ""}${pulseText}`,
         },
         "Submit",
@@ -386,7 +396,7 @@ export class QasmCommands {
         name: jobName,
         project: target.project,
         resource: target.resource,
-        backend: target.backend,
+        backend: backendKeyName(target),
         instance: target.instance,
         state: "SUBMITTED",
         submittedAt: res.submittedAt,
@@ -394,7 +404,7 @@ export class QasmCommands {
         circuits: res.circuits,
         calibrationSetId: res.calibrationSetId,
         source: docs.map((d) => vscode.workspace.asRelativePath(d.uri)).join(", "),
-        estimate: { low: est.low, high: est.high },
+        estimate: est ? { low: est.low, high: est.high } : undefined,
         // pulse jobs always keep their sources: downloading recompiles them to map results to bits
         qasmSources: pulse || sources.join("").length <= MAX_STORED_SOURCE ? sources : undefined,
         kind: pulse ? "pulse" : "circuit",
@@ -402,9 +412,11 @@ export class QasmCommands {
         pulsePayload: pulse ? { operators: pulse.operators, use: pulse.use } : undefined,
         origin: "extension",
       });
-      vscode.window.showInformationMessage(`QaaS: submitted job #${res.jobId} (est. ${formatRange(est)} billed).`);
+      vscode.window.showInformationMessage(
+        `QaaS: submitted job #${res.jobId}${est ? ` (est. ${formatRange(est)} billed)` : ""}.`,
+      );
     } catch (e) {
-      vscode.window.showErrorMessage(`QaaS: submit failed: ${(e as Error).message}`);
+      showError(`QaaS: submit failed: ${(e as Error).message}`);
     }
   }
 }

@@ -4,13 +4,16 @@
  */
 
 import * as vscode from "vscode";
-import type { Bridge } from "./bridge";
+import { type Bridge, currentRuntime } from "./bridge";
 import { currentTarget, devEnvPath, devOverrides, lexisInstance, lexisToken } from "./config";
 import { instanceLabel, PRODUCTION_AAI_URL, sameInstance, tokenKey } from "./core/devEnv";
-import { createEnvironment, installQaas, selectInterpreter } from "./environments";
+import { createEnvironment, installQaas, QAAS_VERSION, selectInterpreter } from "./environments";
+import { showError } from "./notify";
 import { currentAuthMode, signInWithWorkflows } from "./workflows";
 
 export interface CheckData {
+  /** "wasm" in the bundled WebAssembly runtime. */
+  runtime?: "python" | "wasm";
   pythonOk?: boolean;
   python: string;
   executable: string;
@@ -34,6 +37,16 @@ export function lexisName(): string {
 }
 
 async function offerFix(message: string, d?: CheckData): Promise<void> {
+  if (currentRuntime() === "wasm") {
+    // The bundled runtime has nothing to install; the way out is a local Python.
+    const choice = await vscode.window.showWarningMessage(message, "Use Python Runtime", "Open Settings");
+    if (choice === "Use Python Runtime") {
+      await vscode.workspace.getConfiguration("qaas").update("runtime", "python", vscode.ConfigurationTarget.Global);
+    } else if (choice) {
+      await vscode.commands.executeCommand("workbench.action.openSettings", "qaas.runtime");
+    }
+    return;
+  }
   const actions = ["Select Interpreter", "Create Environment"];
   if (d?.pythonOk && (!d.importable || d.qaasOutdated)) {
     actions.unshift(d.importable ? "Upgrade qaas" : "Install qaas");
@@ -57,7 +70,7 @@ function problemOf(d: CheckData): string | undefined {
     return `QaaS: qaas is not installed in ${d.executable}${d.importError ? ` (${d.importError})` : ""}.`;
   }
   if (d.qaasOutdated) {
-    return `QaaS: qaas ${d.packages.qaas} is older than 1.0.0.`;
+    return `QaaS: qaas ${d.packages.qaas} is older than ${QAAS_VERSION}.`;
   }
   return undefined;
 }
@@ -79,7 +92,11 @@ export async function ensureEnvironment(
     d = await bridge.request<CheckData>("check", currentAuthMode() === "workflows" ? { auth: "workflows" } : {});
   } catch (e) {
     output.appendLine(`[environment] check failed: ${(e as Error).message}`);
-    await offerFix(`QaaS: could not run Python (${(e as Error).message}).`);
+    await offerFix(
+      currentRuntime() === "wasm"
+        ? `QaaS: the WebAssembly runtime did not start (${(e as Error).message}).`
+        : `QaaS: could not run Python (${(e as Error).message}).`,
+    );
     return false;
   }
   if (report) {
@@ -99,7 +116,9 @@ export async function ensureEnvironment(
   }
   bridge.environmentOk = true;
   if (report) {
-    vscode.window.showInformationMessage(`QaaS: qaas ${d.packages.qaas} is ready (Python ${d.python}).`);
+    vscode.window.showInformationMessage(
+      `QaaS: qaas ${d.packages.qaas} is ready (Python ${d.python}${d.runtime === "wasm" ? ", WebAssembly" : ""}).`,
+    );
   }
   return true;
 }
@@ -182,11 +201,13 @@ export async function pasteToken(
   const server = instance?.aaiUrl ?? instance?.apiUrl ?? PRODUCTION_AAI_URL;
   const token = await vscode.window.showInputBox({
     title: `${name} token`,
-    prompt: instance
-      ? `Refresh/offline token (recommended) or access token. It will be sent to ${server} (non-production instance from ${
-          devOverrides().PY4LEXIS_AAI_URL || devOverrides().PY4LEXIS_API_URL ? devEnvPath() : "settings"
-        }) and used only there.`
-      : `Refresh/offline token (recommended) or access token for LEXIS production (${server}).`,
+    prompt: `Refresh/offline token (recommended) or access token${
+      instance
+        ? `. It will be sent to ${server} (non-production instance from ${
+            devOverrides().PY4LEXIS_AAI_URL || devOverrides().PY4LEXIS_API_URL ? devEnvPath() : "settings"
+          }) and used only there.`
+        : ` for LEXIS production (${server}).`
+    }`,
     password: true,
     ignoreFocusOut: true,
     validateInput: (v) =>
@@ -235,7 +256,7 @@ async function signInThroughWorkflows(
     return true;
   } catch (e) {
     output.appendLine(`[session] IT4I Workflows sign-in check failed: ${(e as Error).message}`);
-    vscode.window.showErrorMessage(`QaaS: the IT4I Workflows sign-in did not work: ${(e as Error).message}`);
+    showError(`QaaS: the IT4I Workflows sign-in did not work: ${(e as Error).message}`);
     return false;
   }
 }
@@ -251,7 +272,9 @@ async function verifySignIn(
     const me = await vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Notification,
-        title: pastedToken ? `QaaS: signing in to ${name}…` : `QaaS: waiting for the ${name} login in the browser…`,
+        title: pastedToken
+          ? `QaaS: signing in to ${name}…`
+          : `QaaS: waiting for you to sign in to ${name} in the browser (Open Login Page)…`,
         cancellable: true,
       },
       async (_p, token) => bridge.call<WhoAmI>("whoami", await currentTarget(secrets), {}, token),
@@ -264,7 +287,7 @@ async function verifySignIn(
     if (pastedToken) {
       await secrets.delete(tokenKey(lexisInstance()));
     }
-    vscode.window.showErrorMessage(`QaaS: sign-in to ${name} failed: ${(e as Error).message}`);
+    showError(`QaaS: sign-in to ${name} failed: ${(e as Error).message}`);
     return false;
   }
 }

@@ -1,4 +1,4 @@
-// Bell state. Use "Run on VLQ" or "Transpile" above, or the play button in the editor title.
+// Bell state. Use "Run on …" or "Transpile" above, or the play button in the editor title.
 OPENQASM 3.0;
 include "stdgates.inc";
 

@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
-import { cfg } from "./config";
-import { estimate, formatRange, VLQ_BILLING } from "./core/estimate";
+import { backendLabel, backendName, cfg } from "./config";
+import { billingModel, estimate, formatRange, formulaText } from "./core/estimate";
 import { parseOperatorDirectives } from "./core/operators";
 import { mentionsQaas, type RunCall, scanRunCalls } from "./core/runScanner";
 
@@ -35,19 +35,24 @@ function notebookPrelude(doc: vscode.TextDocument): string {
 }
 
 export interface DetectedCall extends RunCall {
-  low: number;
-  high: number;
+  /** Billed-time range; undefined when no billing model is known for the backend. */
+  low?: number;
+  high?: number;
 }
 
-/** qaas submissions in a Python file or notebook cell, with estimates. */
+/** qaas submissions in a Python file or notebook cell, with estimates where a billing model is known. */
 export function detectCalls(doc: vscode.TextDocument): DetectedCall[] {
   const prelude = notebookPrelude(doc);
   const text = doc.getText();
   if (!mentionsQaas(`${prelude}\n${text}`)) {
     return [];
   }
+  const model = billingModel(backendName());
   return scanRunCalls(text, prelude).map((c) => {
-    const e = estimate({ shots: c.shots, circuits: c.circuits ?? 1 });
+    if (!model) {
+      return c;
+    }
+    const e = estimate({ shots: c.shots, circuits: c.circuits ?? 1 }, model);
     return { ...c, low: e.low, high: e.high };
   });
 }
@@ -74,23 +79,33 @@ export class EstimateCodeLensProvider implements vscode.CodeLensProvider {
   }
 
   private pythonLenses(doc: vscode.TextDocument): vscode.CodeLens[] {
+    const model = billingModel(backendName());
     return detectCalls(doc).map((c) => {
       const range = new vscode.Range(c.line, 0, c.line, 0);
-      const e = estimate({ shots: c.shots, circuits: c.circuits ?? 1 });
+      const args = [{ shots: c.shots, circuits: c.circuits ?? 1 }];
+      if (!model) {
+        return new vscode.CodeLens(range, {
+          title: `$(watch) ${describeCall(c)} · no billing model for ${backendLabel()}`,
+          tooltip: "QaaS knows the billing rules of some backends only; this one's cost cannot be estimated.",
+          command: "qaas.openEstimator",
+          arguments: args,
+        });
+      }
+      const e = estimate(args[0], model);
       return new vscode.CodeLens(range, {
-        title: `$(watch) VLQ billed ≈ ${formatRange(e)} · ${describeCall(c)}`,
+        title: `$(watch) ${model.backend} billed ≈ ${formatRange(e)} · ${describeCall(c)}`,
         tooltip:
-          `Estimated VLQ consumption: VLQ jobs × max(shots × (350 µs + circuit time ≤ 50 µs), 0.9 s). ` +
-          `Each circuit counts as one VLQ job. Click to open the estimator.`,
+          `Estimated ${model.backend} consumption: ${formulaText(model)}. ` +
+          `Each circuit counts as one job. Click to open the estimator.`,
         command: "qaas.openEstimator",
-        arguments: [{ shots: c.shots, circuits: c.circuits ?? 1 }],
+        arguments: args,
       });
     });
   }
 
   private qasmLenses(doc: vscode.TextDocument): vscode.CodeLens[] {
     const shots = cfg().get<number>("defaultShots") ?? 1024;
-    const e = estimate({ shots, circuits: 1 });
+    const model = billingModel(backendName());
     const range = new vscode.Range(0, 0, 0, 0);
     const use = parseOperatorDirectives(doc.getText()).use;
     const pulse = Object.entries(use)
@@ -98,7 +113,7 @@ export class EstimateCodeLensProvider implements vscode.CodeLensProvider {
       .join(", ");
     return [
       new vscode.CodeLens(range, {
-        title: `$(play) Run on VLQ${pulse ? ` (${pulse})` : ""}`,
+        title: `$(play) Run on ${backendName() ?? "QPU"}${pulse ? ` (${pulse})` : ""}`,
         tooltip: pulse ? "Pulse-level run with operators from .qaas/operators" : undefined,
         command: "qaas.runQasm",
         arguments: [doc.uri],
@@ -114,12 +129,16 @@ export class EstimateCodeLensProvider implements vscode.CodeLensProvider {
         command: "qaas.transpileQasm",
         arguments: [doc.uri],
       }),
-      new vscode.CodeLens(range, {
-        title: `$(watch) ≈ ${formatRange(e)} billed at ${shots.toLocaleString()} shots`,
-        tooltip: `Estimate per ${VLQ_BILLING.docsUrl}. Change the default with qaas.defaultShots.`,
-        command: "qaas.openEstimator",
-        arguments: [{ shots, circuits: 1 }],
-      }),
+      ...(model
+        ? [
+            new vscode.CodeLens(range, {
+              title: `$(watch) ≈ ${formatRange(estimate({ shots, circuits: 1 }, model))} billed at ${shots.toLocaleString()} shots`,
+              tooltip: `Estimate per ${model.docsUrl}. Change the default with qaas.defaultShots.`,
+              command: "qaas.openEstimator",
+              arguments: [{ shots, circuits: 1 }],
+            }),
+          ]
+        : []),
     ];
   }
 }

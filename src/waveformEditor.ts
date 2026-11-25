@@ -10,6 +10,7 @@ import {
   shapeOnly,
   unverifyLocus,
 } from "./core/operators";
+import { showError } from "./notify";
 import { type CatalogEntry, describeShape, type OperatorCatalog, type OperatorNode, shortId } from "./operators";
 
 type Valid = CatalogEntry & { spec: OperatorSpec };
@@ -162,7 +163,7 @@ export class WaveformEditor {
             4000,
           );
         } catch (e) {
-          vscode.window.showErrorMessage(`QaaS: ${(e as Error).message}`);
+          showError(`QaaS: ${(e as Error).message}`);
         }
         break;
       }

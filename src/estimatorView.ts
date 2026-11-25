@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
-import { cfg } from "./config";
-import { estimate, formatRange, formatSeconds, VLQ_BILLING } from "./core/estimate";
+import { backendLabel, backendName, cfg } from "./config";
+import { BILLING_MODELS, billingModel, estimate, formatRange, formatSeconds, formulaText } from "./core/estimate";
 import { nonce as makeNonce } from "./core/nonce";
 import { describeCall, detectCalls, isQasm } from "./estimateLens";
 
@@ -11,7 +11,7 @@ export interface EstimatorPreset {
   submissions?: number;
 }
 
-/** Sidebar calculator for VLQ billed time, plus the submissions found in the active editor. */
+/** Sidebar calculator for billed QPU time (backends with a known billing model), plus the submissions found in the active editor. */
 export class EstimatorViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   static readonly viewId = "qaas.estimator";
   private view?: vscode.WebviewView;
@@ -52,7 +52,10 @@ export class EstimatorViewProvider implements vscode.WebviewViewProvider, vscode
         }
         this.postDetected();
       } else if (msg?.type === "openDocs") {
-        void vscode.env.openExternal(vscode.Uri.parse(VLQ_BILLING.docsUrl));
+        const model = billingModel(backendName());
+        if (model) {
+          void vscode.env.openExternal(vscode.Uri.parse(model.docsUrl));
+        }
       } else if (msg?.type === "reveal" && typeof msg.line === "number") {
         const editor = vscode.window.activeTextEditor;
         if (editor) {
@@ -63,6 +66,13 @@ export class EstimatorViewProvider implements vscode.WebviewViewProvider, vscode
       }
     });
     view.onDidChangeVisibility(() => view.visible && this.postDetected());
+  }
+
+  /** The backend changed: render the calculator for its billing model. */
+  refresh(): void {
+    if (this.view) {
+      this.view.webview.html = this.html();
+    }
   }
 
   async open(preset?: EstimatorPreset): Promise<void> {
@@ -89,24 +99,28 @@ export class EstimatorViewProvider implements vscode.WebviewViewProvider, vscode
       this.post({ type: "detected", file: null, rows: [] });
       return;
     }
+    const model = billingModel(backendName());
     let rows: { line: number; label: string; range: string; high: number }[] = [];
     if (isQasm(doc)) {
       const shots = cfg().get<number>("defaultShots") ?? 1024;
-      const e = estimate({ shots, circuits: 1 });
+      const e = model ? estimate({ shots, circuits: 1 }, model) : undefined;
       rows = [
         {
           line: 0,
           label: `1 circuit × ${shots.toLocaleString()} shots (qaas.defaultShots)`,
-          range: formatRange(e),
-          high: e.high,
+          range: e ? formatRange(e) : "",
+          high: e?.high ?? 0,
         },
       ];
     } else if (doc.languageId === "python") {
       rows = detectCalls(doc).map((c) => ({
         line: c.line,
         label: `line ${c.line + 1}: ${c.kind === "playlist" ? "pulla playlist, " : ""}${describeCall(c)}`,
-        range: formatRange({ low: c.low, high: c.high, vlqJobs: 0, shots: c.shots, minimumApplies: false }),
-        high: c.high,
+        range:
+          c.low === undefined || c.high === undefined
+            ? ""
+            : formatRange({ low: c.low, high: c.high, jobs: 0, shots: c.shots, minimumApplies: false }),
+        high: c.high ?? 0,
       }));
     }
     const total = rows.reduce((a, r) => a + r.high, 0);
@@ -114,13 +128,16 @@ export class EstimatorViewProvider implements vscode.WebviewViewProvider, vscode
       type: "detected",
       file: path.basename(doc.fileName),
       rows,
-      total: rows.length > 1 ? formatSeconds(total) : null,
+      total: rows.length > 1 && model ? formatSeconds(total) : null,
     });
   }
 
   private html(): string {
     const nonce = makeNonce();
-    const consts = JSON.stringify(VLQ_BILLING);
+    const model = billingModel(backendName());
+    const consts = JSON.stringify(model ?? null);
+    const known = BILLING_MODELS.map((m) => m.backend).join(", ");
+    const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;");
     return `<!doctype html><html><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
 <style>
@@ -139,18 +156,22 @@ export class EstimatorViewProvider implements vscode.WebviewViewProvider, vscode
   code { font-family: var(--vscode-editor-font-family); font-size: 11px; }
 </style></head><body>
 <h3>Active editor</h3>
-<div id="detected" class="hint">Open a Python file, notebook or .qasm file that submits to VLQ.</div>
+<div id="detected" class="hint">Open a Python file, notebook or .qasm file that submits to a QPU.</div>
+<p id="nomodel" class="hint" ${model ? "hidden" : ""}>No billing model is known for ${esc(backendLabel())}, so its cost
+cannot be estimated. QaaS knows the billing rules of: ${esc(known)}.</p>
 
-<h3>Calculator</h3>
+<div id="calc" ${model ? "" : "hidden"}>
+<h3>Calculator${model ? ` · ${esc(model.backend)}` : ""}</h3>
 <label for="shots">Shots per circuit</label><input id="shots" type="number" min="1" step="1" value="1024">
 <label for="circuits">Circuits per submission</label><input id="circuits" type="number" min="1" step="1" value="1">
-<div class="hint">Each circuit runs as its own VLQ job.</div>
+<div class="hint">Each circuit runs as its own job.</div>
 <label for="subs">Submissions</label><input id="subs" type="number" min="1" step="1" value="1">
 <label for="cus">Circuit time: <span id="cusv"></span></label>
-<input id="cus" type="range" min="0" max="50" step="1" value="50">
-<label><input id="unknown" type="checkbox" checked> Unknown circuit time (show 0–50 µs range)</label>
+<input id="cus" type="range" min="0" max="${model?.maxCircuitUs ?? 50}" step="1" value="${model?.maxCircuitUs ?? 50}">
+<label><input id="unknown" type="checkbox" checked> Unknown circuit time (show 0–${model?.maxCircuitUs ?? 50} µs range)</label>
 <div class="result"><div class="hint">Billed QPU time</div><div class="big" id="total"></div><div class="hint" id="detail"></div></div>
-<p class="hint">billed = VLQ jobs × max(shots × (350 µs + circuit time), 0.9 s).<br>Job latency (3–15 s) is not billed. <a id="docs">VLQ consumption guide</a></p>
+<p class="hint">billed = ${model ? esc(formulaText(model)) : ""}.<br>Job latency is not billed. <a id="docs">${model ? esc(model.docsTitle) : ""}</a></p>
+</div>
 <script nonce="${nonce}">
 const B = ${consts};
 const vscode = acquireVsCodeApi();
@@ -158,17 +179,18 @@ const $ = (id) => document.getElementById(id);
 const per = (shots, us) => Math.max(shots * (B.postprocessingUs + us) * 1e-6, B.minPerJobSeconds);
 const fmt = (s) => s < 60 ? s.toFixed(s < 10 ? 2 : 1) + " s" : s < 3600 ? Math.floor(s / 60) + " min " + Math.round(s % 60) + " s" : (s / 3600).toFixed(2) + " h";
 function calc() {
+  if (!B) return;
   const shots = Math.max(0, Math.floor(+$("shots").value || 0));
   const jobs = Math.max(1, Math.floor(+$("circuits").value || 1)) * Math.max(1, Math.floor(+$("subs").value || 1));
   const unknown = $("unknown").checked;
   $("cus").disabled = unknown;
   const us = +$("cus").value;
-  $("cusv").textContent = unknown ? "0–50 µs" : us + " µs";
+  $("cusv").textContent = unknown ? "0–" + B.maxCircuitUs + " µs" : us + " µs";
   const lo = jobs * per(shots, unknown ? 0 : us), hi = jobs * per(shots, unknown ? B.maxCircuitUs : us);
   const a = fmt(lo), b = fmt(hi);
   $("total").textContent = a === b ? b : a.replace(/ s$/, "") + "–" + b;
   const floor = shots * (B.postprocessingUs + (unknown ? B.maxCircuitUs : us)) * 1e-6 < B.minPerJobSeconds;
-  $("detail").textContent = jobs + " VLQ job" + (jobs === 1 ? "" : "s") + (floor ? " · 0.9 s minimum per job applies" : "");
+  $("detail").textContent = jobs + " job" + (jobs === 1 ? "" : "s") + (floor ? " · " + B.minPerJobSeconds + " s minimum per job applies" : "");
   vscode.setState({ shots: $("shots").value, circuits: $("circuits").value, subs: $("subs").value, cus: $("cus").value, unknown });
 }
 for (const id of ["shots", "circuits", "subs", "cus", "unknown"]) $(id).addEventListener("input", calc);
@@ -187,7 +209,7 @@ window.addEventListener("message", (ev) => {
     el.replaceChildren();
     if (!m.file || m.rows.length === 0) {
       el.className = "hint";
-      el.textContent = m.file ? "No VLQ submissions found in " + m.file + "." : "No active editor.";
+      el.textContent = m.file ? "No QPU submissions found in " + m.file + "." : "No active editor.";
       return;
     }
     el.className = "";

@@ -1,12 +1,26 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
-import { Bridge } from "./bridge";
+import { Bridge, currentRuntime } from "./bridge";
 import { CalibrationCommands, CalibrationStore, CalibrationsTreeProvider } from "./calibrations";
-import { cfg, currentTarget, devEnvPath, devOverrides, lexisInstance, requireProject, targetEnv } from "./config";
+import {
+  backendLabel,
+  backendName,
+  cfg,
+  configuredBackend,
+  currentTarget,
+  devEnvPath,
+  devOverrides,
+  initBackendMemory,
+  lexisInstance,
+  onDidChangeBackend,
+  requireProject,
+  targetEnv,
+} from "./config";
 import { devEnvTemplate, instanceFromTokenKey, instanceLabel, type LexisInstance } from "./core/devEnv";
-import { estimate, formatRange, formatSeconds } from "./core/estimate";
+import { billingModel, estimate, formatRange, formatSeconds } from "./core/estimate";
+import { signInChanged } from "./core/workflowsAuth";
 import { createEnvironment, installQaas, selectInterpreter } from "./environments";
-import { detectCalls, EstimateCodeLensProvider, PYTHON_SELECTOR, QASM_SELECTOR } from "./estimateLens";
+import { describeCall, detectCalls, EstimateCodeLensProvider, PYTHON_SELECTOR, QASM_SELECTOR } from "./estimateLens";
 import { type EstimatorPreset, EstimatorViewProvider } from "./estimatorView";
 import {
   isForeign,
@@ -19,14 +33,30 @@ import {
   JobsTreeProvider,
   TERMINAL,
 } from "./jobs";
+import { setOutputChannel, showError } from "./notify";
 import { OperatorCatalog, OperatorCommands, type OperatorNode, OperatorsTreeProvider } from "./operators";
 import { resolvePython } from "./python";
 import { QasmCommands, TRANSPILED_SCHEME, TranspiledContentProvider } from "./qasm";
+import {
+  bundleManifest,
+  checkImports,
+  type ImportProblem,
+  isQaasScript,
+  LIBRARIES_SCHEME,
+  librariesMarkdown,
+  ScriptRunner,
+} from "./scriptRunner";
+import { ScriptRunPanel } from "./scriptRunPanel";
 import { ensureEnvironment, ensureReady, lexisName, pasteToken, signIn, type WhoAmI } from "./session";
 import { initTrust } from "./trust";
 import { WaveformEditor } from "./waveformEditor";
-import { signInChanged } from "./core/workflowsAuth";
-import { currentAuthMode, currentService, forgetWorkflowsSettings, invalidateWorkflowsToken, watchWorkflows } from "./workflows";
+import {
+  currentAuthMode,
+  currentService,
+  forgetWorkflowsSettings,
+  invalidateWorkflowsToken,
+  watchWorkflows,
+} from "./workflows";
 
 interface BackendInfo {
   name: string;
@@ -37,6 +67,7 @@ interface BackendInfo {
 }
 
 let output: vscode.OutputChannel;
+let scripts: ScriptRunner;
 
 async function listBackends(context: vscode.ExtensionContext, bridge: Bridge): Promise<void> {
   if (!(await requireProject()) || !(await ensureReady(bridge, context.secrets, output))) {
@@ -54,7 +85,7 @@ async function listBackends(context: vscode.ExtensionContext, bridge: Bridge): P
       (_p, token) => bridge.call<BackendInfo[]>("backends", target, {}, token),
     );
   } catch (e) {
-    vscode.window.showErrorMessage(`QaaS: ${(e as Error).message}`);
+    showError(`QaaS: ${(e as Error).message}`);
     return;
   }
   if (backends.length === 0) {
@@ -103,9 +134,14 @@ interface AccessToken {
   expiresAt?: string | null;
 }
 
-async function runPythonFile(context: vscode.ExtensionContext, bridge: Bridge, uri?: vscode.Uri): Promise<void> {
+async function runPythonFile(
+  context: vscode.ExtensionContext,
+  bridge: Bridge,
+  jobs: { store: JobStore; manager: JobManager },
+  uri?: vscode.Uri,
+): Promise<void> {
   const doc = uri ? await vscode.workspace.openTextDocument(uri) : vscode.window.activeTextEditor?.document;
-  if (!doc || doc.languageId !== "python") {
+  if (doc?.languageId !== "python") {
     vscode.window.showWarningMessage("QaaS: open a Python file to run.");
     return;
   }
@@ -115,21 +151,35 @@ async function runPythonFile(context: vscode.ExtensionContext, bridge: Bridge, u
   if (!(await requireProject())) {
     return;
   }
+  let wasm = currentRuntime() === "wasm";
+  if (wasm) {
+    scripts.prewarm(); // loads while the user reads the dialogs below
+    const choice = await wasmImportChoice(context, doc);
+    if (choice === "cancel") {
+      return;
+    }
+    wasm = choice === "wasm";
+  }
   const calls = detectCalls(doc);
   if (calls.length > 0 && cfg().get<boolean>("confirmSubmit", true)) {
-    const total = calls.reduce((a, c) => a + c.high, 0);
-    const lines = calls.map(
-      (c) => `line ${c.line + 1}: ${formatRange(estimate({ shots: c.shots, circuits: c.circuits ?? 1 }))}`,
-    );
+    const model = billingModel(backendName());
     const unknown = calls.some((c) => c.circuits === undefined)
       ? "\nSome circuit counts are unknown; those are estimated per circuit."
       : "";
+    let detail: string;
+    if (model) {
+      const total = calls.reduce((a, c) => a + (c.high ?? 0), 0);
+      const lines = calls.map(
+        (c) => `line ${c.line + 1}: ${formatRange(estimate({ shots: c.shots, circuits: c.circuits ?? 1 }, model))}`,
+      );
+      detail = `Estimated billed QPU time: up to ${formatSeconds(total)}\n${lines.join("\n")}${unknown}`;
+    } else {
+      const lines = calls.map((c) => `line ${c.line + 1}: ${describeCall(c)}`);
+      detail = `Submissions found:\n${lines.join("\n")}\nNo billing model is known for ${backendLabel()}; the cost cannot be estimated.`;
+    }
     const ok = await vscode.window.showInformationMessage(
-      `Run ${path.basename(doc.fileName)} on VLQ?`,
-      {
-        modal: true,
-        detail: `Estimated billed QPU time: up to ${formatSeconds(total)}\n${lines.join("\n")}${unknown}`,
-      },
+      `Run ${path.basename(doc.fileName)} on ${backendLabel()}?`,
+      { modal: true, detail },
       "Run",
     );
     if (ok !== "Run") {
@@ -153,15 +203,36 @@ async function runPythonFile(context: vscode.ExtensionContext, bridge: Bridge, u
       (_p, token) => bridge.call<AccessToken>("accessToken", t, {}, token),
     );
   } catch (e) {
-    vscode.window.showErrorMessage(`QaaS: could not get a LEXIS access token: ${(e as Error).message}`);
+    showError(`QaaS: could not get a LEXIS access token: ${(e as Error).message}`);
     return;
   }
   const env = targetEnv({ ...t, token: access.token });
-  const terminal = vscode.window.createTerminal({ name: "QaaS run", env });
-  terminal.show();
-  const python = await resolvePython();
-  const q = (s: string) => `"${s.replace(/"/g, '\\"')}"`;
-  terminal.sendText(`${process.platform === "win32" ? "& " : ""}${q(python)} ${q(doc.uri.fsPath)}`);
+  if (wasm) {
+    // Jobs the script submits: tracked in the Jobs view and shown in a panel for this run.
+    const panel = new ScriptRunPanel(doc.uri.fsPath, t, jobs.store, jobs.manager);
+    context.subscriptions.push(panel);
+    await scripts.run({
+      file: doc.uri.fsPath,
+      env,
+      onJob: (job) => void panel.addJob(job),
+      onExit: (code, how) => panel.finished(code, how),
+      cwd: vscode.workspace.getWorkspaceFolder(doc.uri)?.uri.fsPath ?? path.dirname(doc.uri.fsPath),
+      onMissing: (modules) =>
+        void vscode.window
+          .showWarningMessage(
+            `QaaS: ${path.basename(doc.fileName)} imports ${modules.map((m) => m.name).join(", ")}, which the WebAssembly runtime does not have. It was not run.`,
+            "Run with Local Python",
+            "Show Bundled Libraries",
+          )
+          .then((c) =>
+            c === "Run with Local Python"
+              ? runLocalPython(doc.uri.fsPath, env)
+              : c && vscode.commands.executeCommand("qaas.showBundledLibraries"),
+          ),
+    });
+  } else {
+    await runLocalPython(doc.uri.fsPath, env);
+  }
   vscode.window
     .showInformationMessage(
       `QaaS: jobs submitted by the script appear in the Jobs view after an import.${
@@ -174,10 +245,124 @@ async function runPythonFile(context: vscode.ExtensionContext, bridge: Bridge, u
     .then((c) => c && vscode.commands.executeCommand("qaas.jobs.import"));
 }
 
+async function runLocalPython(file: string, env: Record<string, string>): Promise<void> {
+  const terminal = vscode.window.createTerminal({ name: "QaaS run", env });
+  terminal.show();
+  const python = await resolvePython();
+  const q = (s: string) => `"${s.replace(/"/g, '\\"')}"`;
+  terminal.sendText(`${process.platform === "win32" ? "& " : ""}${q(python)} ${q(file)}`);
+}
+
+/**
+ * Before a run in the WebAssembly runtime: imports it does not have mean a local Python, or not
+ * running; limited ones (Aer, threads, processes) get a choice.
+ */
+async function wasmImportChoice(
+  context: vscode.ExtensionContext,
+  doc: vscode.TextDocument,
+): Promise<"wasm" | "local" | "cancel"> {
+  const manifest = bundleManifest(context.extensionPath);
+  if (!manifest?.modules) {
+    return "wasm";
+  }
+  const { missing, limited } = checkImports(doc.getText(), path.dirname(doc.uri.fsPath), manifest);
+  const where = (list: ImportProblem[]) => list.map((m) => `${m.name} (line ${m.line + 1})`).join(", ");
+  let choice: string | undefined;
+  if (missing.length) {
+    choice = await vscode.window.showWarningMessage(
+      `${path.basename(doc.fileName)} imports ${where(missing)}, which the WebAssembly runtime bundled with QaaS does not have.`,
+      { modal: true, detail: "Run it with your local Python (qaas.pythonPath), or see which libraries are bundled." },
+      "Run with Local Python",
+      "Show Bundled Libraries",
+    );
+  } else if (limited.length) {
+    choice = await vscode.window.showWarningMessage(
+      `${path.basename(doc.fileName)} uses ${where(limited)}, which the WebAssembly runtime supports only partly.`,
+      { modal: true, detail: limited.map((m) => `${m.name}: ${m.reason}`).join("\n") },
+      "Run in WebAssembly",
+      "Run with Local Python",
+    );
+  } else {
+    return "wasm";
+  }
+  if (choice === "Show Bundled Libraries") {
+    await vscode.commands.executeCommand("qaas.showBundledLibraries");
+  }
+  return choice === "Run with Local Python" ? "local" : choice === "Run in WebAssembly" ? "wasm" : "cancel";
+}
+
+/** Hints on imports of QPU scripts that the WebAssembly runtime does not have or limits. */
+function watchScriptImports(context: vscode.ExtensionContext): vscode.Disposable {
+  const diagnostics = vscode.languages.createDiagnosticCollection("qaas-script-imports");
+  const libraries = vscode.Uri.parse("command:qaas.showBundledLibraries");
+  const update = (doc: vscode.TextDocument) => {
+    const manifest = bundleManifest(context.extensionPath);
+    if (doc.languageId !== "python" || doc.uri.scheme !== "file") {
+      return;
+    }
+    const source = doc.getText();
+    if (currentRuntime() !== "wasm" || !manifest?.modules || !isQaasScript(source)) {
+      diagnostics.delete(doc.uri);
+      return;
+    }
+    const { missing, limited } = checkImports(source, path.dirname(doc.uri.fsPath), manifest);
+    const make = (m: ImportProblem, message: string) => {
+      const text = doc.lineAt(m.line).text;
+      const col = Math.max(0, text.indexOf(m.name));
+      const d = new vscode.Diagnostic(
+        new vscode.Range(m.line, col, m.line, col + m.name.length),
+        message,
+        vscode.DiagnosticSeverity.Information,
+      );
+      d.source = "QaaS";
+      d.code = { value: "bundled libraries", target: libraries };
+      return d;
+    };
+    diagnostics.set(doc.uri, [
+      ...missing.map((m) =>
+        make(
+          m,
+          `${m.name} is not in the WebAssembly runtime bundled with QaaS; Run Python File on QPU will offer your local Python.`,
+        ),
+      ),
+      ...limited.map((m) => make(m, `${m.reason}`)),
+    ]);
+  };
+  let timer: NodeJS.Timeout | undefined;
+  vscode.workspace.textDocuments.forEach(update);
+  return vscode.Disposable.from(
+    diagnostics,
+    vscode.workspace.onDidOpenTextDocument(update),
+    vscode.workspace.onDidChangeTextDocument((e) => {
+      clearTimeout(timer);
+      timer = setTimeout(() => update(e.document), 500);
+    }),
+    vscode.workspace.onDidCloseTextDocument((d) => diagnostics.delete(d.uri)),
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration("qaas.runtime")) {
+        vscode.workspace.textDocuments.forEach(update);
+      }
+    }),
+  );
+}
+
+async function showBundledLibraries(context: vscode.ExtensionContext): Promise<void> {
+  if (!bundleManifest(context.extensionPath)) {
+    vscode.window.showInformationMessage(
+      "QaaS: this build has no WebAssembly runtime; scripts run with your local Python (qaas.pythonPath).",
+    );
+    return;
+  }
+  await vscode.commands.executeCommand(
+    "markdown.showPreview",
+    vscode.Uri.parse(`${LIBRARIES_SCHEME}:Python libraries.md`),
+  );
+}
+
 function updateStatusBar(item: vscode.StatusBarItem): void {
   const dev = devOverrides();
   const project = dev.QAAS_LEXIS_PROJECT || cfg().get<string>("lexisProject");
-  const backend = dev.QAAS_BACKEND_NAME || cfg().get<string>("backendName") || "VLQ";
+  const backend = configuredBackend(dev) ?? backendName() ?? "QPU";
   const instance = lexisInstance(dev);
   const label = instanceLabel(instance);
   item.text = `$(pulse) ${backend}${label ? ` · LEXIS ${label}` : ""}`;
@@ -226,10 +411,14 @@ async function logOut(context: vscode.ExtensionContext, bridge: Bridge): Promise
   const external = workflows
     ? undefined
     : devOverrides().QAAS_LEXIS_TOKEN
-    ? { token: devOverrides().QAAS_LEXIS_TOKEN, instance: lexisInstance(), where: devEnvPath() }
-    : process.env.QAAS_LEXIS_TOKEN
-      ? { token: process.env.QAAS_LEXIS_TOKEN, instance: undefined, where: "the QAAS_LEXIS_TOKEN environment variable" }
-      : undefined;
+      ? { token: devOverrides().QAAS_LEXIS_TOKEN, instance: lexisInstance(), where: devEnvPath() }
+      : process.env.QAAS_LEXIS_TOKEN
+        ? {
+            token: process.env.QAAS_LEXIS_TOKEN,
+            instance: undefined,
+            where: "the QAAS_LEXIS_TOKEN environment variable",
+          }
+        : undefined;
   let revokeExternal = false;
   if (external) {
     const choice = await vscode.window.showWarningMessage(
@@ -340,7 +529,7 @@ async function testConnection(context: vscode.ExtensionContext, bridge: Bridge):
     );
   } catch (e) {
     output.appendLine(`[connection] failed: ${(e as Error).message}`);
-    vscode.window.showErrorMessage(`QaaS: connection to LEXIS ${where} failed: ${(e as Error).message}`);
+    showError(`QaaS: connection to LEXIS ${where} failed: ${(e as Error).message}`);
   }
 }
 
@@ -374,11 +563,20 @@ async function synchronize(
 
         progress.report({ message: "checking backends…" });
         const backends = await bridge.call<BackendInfo[]>("backends", target, {}, token);
-        const current = backends.find((b) => b.name === target.backend);
-        if (current) {
-          summary.push(`backend ${current.name}${current.resource ? ` on ${current.resource}` : ""}`);
+        const names = backends.map((b) => b.name).join(", ") || "none";
+        if (target.backend) {
+          const current = backends.find((b) => b.name === target.backend);
+          summary.push(
+            current
+              ? `backend ${current.name}${current.resource ? ` on ${current.resource}` : ""}`
+              : `backend ${target.backend} not available (${names})`,
+          );
+        } else if (backends.length === 1) {
+          // The resource's only backend; Bridge.call remembers its name.
+          const b = backends[0];
+          summary.push(`backend ${b.name}${b.resource ? ` on ${b.resource}` : ""}`);
         } else {
-          summary.push(`backend ${target.backend} not available (${backends.map((b) => b.name).join(", ") || "none"})`);
+          summary.push(`several backends on the resource (${names}): choose one`);
         }
 
         progress.report({ message: "importing jobs…" });
@@ -390,30 +588,43 @@ async function synchronize(
         progress.report({ message: "refreshing active jobs…" });
         await jobs.poll(true);
 
+        // The calibration set is the last, optional step: when HEAppE does not deliver it (e.g. it
+        // closes the connection), the jobs above are still synchronized.
         progress.report({ message: "reading the calibration set…" });
-        const cal = await calibrations.refreshCurrent(true);
-        if (cal) {
-          summary.push(`calibration set ${cal.calibrationSetId.slice(0, 8)}…`);
-        }
-        if (catalog.valid().length > 0) {
-          await catalog.refreshPulseInfo(token);
+        try {
+          const cal = await calibrations.refreshCurrent(true);
+          if (cal) {
+            summary.push(`calibration set ${cal.calibrationSetId.slice(0, 8)}…`);
+          }
+          if (catalog.valid().length > 0) {
+            await catalog.refreshPulseInfo(token);
+          }
+        } catch (e) {
+          if (token.isCancellationRequested) {
+            throw e;
+          }
+          output.appendLine(`[sync] calibration set not read: ${(e as Error).message}`);
+          summary.push("calibration set not read (HEAppE did not deliver it; see the QaaS output)");
         }
       },
     );
   } catch (e) {
     output.appendLine(`[sync] failed: ${(e as Error).message}`);
-    vscode.window.showErrorMessage(`QaaS: synchronization with ${name} failed: ${(e as Error).message}`);
+    showError(`QaaS: synchronization with ${name} failed: ${(e as Error).message}`);
     return;
   }
   output.appendLine(`[sync] ${summary.join(" · ")}`);
-  const missing = summary.find((s) => s.includes("not available"));
+  const missing = summary.find((s) => s.includes("not available") || s.includes("choose one"));
   if (missing) {
     const c = await vscode.window.showWarningMessage(`QaaS: ${summary.join(" · ")}.`, "Choose Backend");
     if (c) {
       await listBackends(context, bridge);
     }
   } else {
-    vscode.window.showInformationMessage(`QaaS: synchronized with ${name}: ${summary.join(" · ")}.`);
+    const details = summary.some((s) => s.includes("QaaS output")) ? ["Show Output"] : [];
+    void vscode.window
+      .showInformationMessage(`QaaS: synchronized with ${name}: ${summary.join(" · ")}.`, ...details)
+      .then((c) => c && output.show(true));
   }
 }
 
@@ -444,11 +655,26 @@ async function openDevConnectionFile(): Promise<void> {
 
 export function activate(context: vscode.ExtensionContext): void {
   output = vscode.window.createOutputChannel("QaaS");
+  setOutputChannel(output);
   initTrust(context.globalState);
   const bridge = new Bridge(context.extensionPath, output, path.join(context.logUri.fsPath, "lexis.log"));
+  scripts = new ScriptRunner(context.extensionPath, output);
+  context.subscriptions.push(
+    scripts,
+    watchScriptImports(context),
+    vscode.workspace.registerTextDocumentContentProvider(LIBRARIES_SCHEME, {
+      provideTextDocumentContent: () => {
+        const manifest = bundleManifest(context.extensionPath);
+        return manifest ? librariesMarkdown(manifest) : "";
+      },
+    }),
+    vscode.commands.registerCommand("qaas.showBundledLibraries", () => showBundledLibraries(context)),
+    vscode.commands.registerCommand("qaas.showOutput", () => output.show(true)),
+  );
   const store = new JobStore(context.globalState);
   const jobs = new JobManager(store, bridge, context.secrets, output);
   const tree = new JobsTreeProvider(store);
+  context.subscriptions.push(initBackendMemory(context.globalState));
   const lens = new EstimateCodeLensProvider();
   const estimator = new EstimatorViewProvider();
   const transpiled = new TranspiledContentProvider();
@@ -506,6 +732,14 @@ export function activate(context: vscode.ExtensionContext): void {
   status.command = "qaas.listBackends";
   updateStatusBar(status);
   status.show();
+  // The backend name feeds the status bar, the run lenses and the billing model.
+  context.subscriptions.push(
+    onDidChangeBackend(() => {
+      updateStatusBar(status);
+      lens.refresh();
+      estimator.refresh();
+    }),
+  );
 
   const devWatcher = vscode.workspace.createFileSystemWatcher(
     new vscode.RelativePattern(vscode.Uri.file(path.dirname(devEnvPath())), path.basename(devEnvPath())),
@@ -541,7 +775,10 @@ export function activate(context: vscode.ExtensionContext): void {
     ...qasm.register(),
 
     vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration("qaas.pythonPath")) {
+      if (
+        e.affectsConfiguration("qaas.runtime") ||
+        (e.affectsConfiguration("qaas.pythonPath") && currentRuntime() === "python")
+      ) {
         bridge.restart();
       }
       if (e.affectsConfiguration("qaas.workflowsIntegration") || e.affectsConfiguration("qaas.workflowsService")) {
@@ -551,7 +788,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (["qaas.lexisProject", "qaas.lexisResource", "qaas.backendName"].some((k) => e.affectsConfiguration(k))) {
         void catalog.loadCachedInfo();
       }
-      if (e.affectsConfiguration("qaas.jobPollSeconds")) {
+      if (e.affectsConfiguration("qaas.jobPollSeconds") || e.affectsConfiguration("qaas.autoRefreshJobs")) {
         jobs.schedule();
       }
       if (e.affectsConfiguration("qaas")) {
@@ -592,9 +829,13 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("qaas.listBackends", () => listBackends(context, bridge)),
 
     // circuits
-    vscode.commands.registerCommand("qaas.newCircuitFile", () => newFromTemplate(context, "vlq_circuit.py", "python")),
+    vscode.commands.registerCommand("qaas.newCircuitFile", () => newFromTemplate(context, "qpu_circuit.py", "python")),
     vscode.commands.registerCommand("qaas.newQasmFile", () => newFromTemplate(context, "bell.qasm", "openqasm")),
-    vscode.commands.registerCommand("qaas.runCurrentFile", (uri?: vscode.Uri) => runPythonFile(context, bridge, uri)),
+    vscode.commands.registerCommand("qaas.runCurrentFile", (uri?: vscode.Uri) =>
+      runPythonFile(context, bridge, { store, manager: jobs }, uri),
+    ),
+    vscode.commands.registerCommand("qaas.jobs.autoRefreshOn", () => jobs.setAutoRefresh(true)),
+    vscode.commands.registerCommand("qaas.jobs.autoRefreshOff", () => jobs.setAutoRefresh(false)),
     vscode.commands.registerCommand("qaas.runQasm", (uri?: vscode.Uri, uris?: vscode.Uri[]) => qasm.run(uri, uris)),
     vscode.commands.registerCommand("qaas.transpileQasm", (uri?: vscode.Uri) => qasm.transpile(uri)),
     vscode.commands.registerCommand("qaas.runQasmWithOperator", (uri?: vscode.Uri) => qasm.runWithOperator(uri)),

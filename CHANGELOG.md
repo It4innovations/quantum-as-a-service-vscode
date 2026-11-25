@@ -1,7 +1,18 @@
 # Changelog
 
-## Unreleased
+## 0.1.0
 
+- Script run panel: jobs a script submits in the WebAssembly runtime appear in the Jobs view at once and in a panel for the run, with live state and a results summary. Eye button in the Jobs view (open: on, closed: off) to turn the automatic refresh of active jobs on or off (`qaas.autoRefreshJobs`). HEAppE job state 256 (deleted) is final instead of unknown.
+- Not tied to one QPU: works with any backend of the LEXIS project's resource (e.g. VLQ at IT4I, EQE at LRZ). `qaas.backendName` defaults to empty (the resource's backend, named once LEXIS reports it); commands and messages say QPU or the backend's name. Billed-time estimates use a per-backend billing model (VLQ's is known); other backends get no estimate instead of VLQ's. The script template is now `qpu_circuit.py`.
+- WebAssembly runtime, the default (`qaas.runtime: wasm`): the Python bridge runs in Pyodide in a worker thread of the extension host, with qaas 1.1.0, py4lexis, qiskit (compiled to WebAssembly) and the IQM stack bundled in `wasm/`, so no local Python is needed; every sign-in method works there. A local Python is optional (`qaas.runtime: python`, `Run Python File on VLQ`, calibration notebooks). `npm run wasm:build` builds or updates the bundle for a new qaas or Pyodide release.
+- qaas 1.1.0: bundled in the WebAssembly runtime; `Install qaas` installs exactly this version into a local Python (with IT4I's package index, which has py4lexis); older ones are reported as outdated.
+- Run Python File on VLQ runs scripts in the WebAssembly runtime by default: output, `input()` and Ctrl+C in a terminal, `plt.show()` opens the figures; imports the bundle lacks are found before the run, with the local Python offered instead. `QaaS: Show Bundled Python Libraries` lists the bundled packages with tips; VLQ scripts get hints on imports that are not bundled. matplotlib is bundled for scripts; qiskit's primitives (StatevectorSampler) work.
+- The LEXIS browser login notification names the login code and asks to click Open Login Page, since the runtime cannot open a browser itself.
+- Billed-time estimates no longer count `backend.run(` mentioned in comments, strings or docstrings.
+- A refused cancel shows HEAppE's reason (e.g. the job is already deleted), and the Jobs view takes over the state HEAppE names. Synchronize keeps its results when HEAppE does not deliver the calibration set.
+- Downloads and the script template use qaas 1.1's job API: `QJob.result()` takes no arguments (per-shot results through `memory=True`) and returns a qiskit `Result`.
+- VLQ-native OpenQASM (`move` on the resonator, as in a transpiled export) parses until qaas handles it; Run from the transpiled view submits the source file.
+- The browser login notification now also appears for the login URL LEXIS sends with a single slash (`https:/aai.lexis.tech/...`).
 - Sign in through the IT4I Workflows extension: `qaas.workflowsIntegration` (off by default, then QaaS signs in with py4lexis as before) takes a short-lived access token from the IT4I Workflows API for every use, keeps it in memory only and never imports py4lexis; `qaas.workflowsService` picks IT4I Workflows (`core`) or EFP Workflows (`efp`).
 - Long-running Python bridge: one LEXIS login per session.
 - Job manager: jobs view, persistence across restarts, background refresh, import from HEAppE, cancel, notifications.

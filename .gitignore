@@ -1,9 +1,35 @@
+# Node / VS Code extension build
 out/
 node_modules/
 *.vsix
 .vscode-test/
-.DS_Store
+
+# Python
 __pycache__/
-lexis_logs.log
-.qaas/dev.env
+*.egg-info/
+.ruff_cache/
+
+# OS
+.DS_Store
+
+# Local QaaS data of this checkout: dev connection file, results, logs
+# (test-fixtures/workspace/.qaas is test data and stays tracked)
+/.qaas/
 qaas-results/
+lexis_logs.log
+
+# WebAssembly runtime, built by npm run wasm:build (packaged into the .vsix)
+/wasm/
+
+# WebAssembly build pipeline (qaas-wasm/): generated files
+qaas-wasm/build-recipe/stubs/*/build/
+qaas-wasm/dev-tests/browser_demo.png
+# Superseded by build.py and wasm/: the first bundle and its Linux-only build script
+qaas-wasm/wheels/
+qaas-wasm/manifest.json
+qaas-wasm/HANDOFF.md
+qaas-wasm/build-recipe/build.sh
+qaas-wasm/build-recipe/overrides.txt
+qaas-wasm/build-recipe/requirements.in
+qaas-wasm/build-recipe/requirements.lock.txt
+qaas-wasm.zip

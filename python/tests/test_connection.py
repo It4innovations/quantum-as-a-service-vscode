@@ -137,6 +137,9 @@ class ConnectionTests(unittest.TestCase):
         self.assertIn("py4lexis", qaas_bridge.Server().check({})["packages"])
         self.assertNotIn("py4lexis", qaas_bridge.Server().check({"auth": "workflows"})["packages"])
 
+    def test_check_reports_the_runtime(self):
+        self.assertEqual(qaas_bridge.Server().check({})["runtime"], "wasm" if qaas_bridge.WASM else "python")
+
     def test_workflows_mode_drops_clients_of_the_previous_token(self):
         server = qaas_bridge.Server()
         p = {"project": "p", "auth": "workflows", "instance": {"apiUrl": "https://api.efp.example.org/"}}

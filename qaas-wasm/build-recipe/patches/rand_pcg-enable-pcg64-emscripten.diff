@@ -1,0 +1,14 @@
+--- a/rand_pcg-0.3.1/src/lib.rs	1970-01-01 01:00:01.000000000 +0100
++++ b/rand_pcg-0.3.1/src/lib.rs	2026-11-18 15:37:20.190737417 +0100
+@@ -37,9 +37,9 @@
+ #![deny(missing_debug_implementations)]
+ #![no_std]
+ 
+-#[cfg(not(target_os = "emscripten"))] mod pcg128;
++ mod pcg128;
+ mod pcg64;
+ 
+-#[cfg(not(target_os = "emscripten"))]
++
+ pub use self::pcg128::{Lcg128Xsl64, Mcg128Xsl64, Pcg64, Pcg64Mcg};
+ pub use self::pcg64::{Lcg64Xsh32, Pcg32};

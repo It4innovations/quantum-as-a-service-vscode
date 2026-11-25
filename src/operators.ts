@@ -2,9 +2,9 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 import { parseDocument } from "yaml";
 import type { Bridge } from "./bridge";
-import { cfg, currentTarget, requireProject, sanitize } from "./config";
+import { backendName, cfg, currentTarget, requireProject, sanitize } from "./config";
 import { buildCalibrationNotebook, calibrationCost } from "./core/calibrationNotebook";
-import { formatSeconds } from "./core/estimate";
+import { billingModel, formatSeconds } from "./core/estimate";
 import {
   applyCalibrationResult,
   type CalibrationEntry,
@@ -28,6 +28,7 @@ import {
   type TemplateOptions,
   upsertEntry,
 } from "./core/operators";
+import { showError } from "./notify";
 import { ensureReady } from "./session";
 
 export const OPERATOR_GLOB = "**/.qaas/operators/*.{yaml,yml,json}";
@@ -626,7 +627,7 @@ export class OperatorCommands {
         `QaaS: calibration set ${shortId(info.calibrationSetId)} on ${info.backend}, ${info.qubits.length} qubits, native prx ${info.nativeImplementation}.`,
       );
     } catch (e) {
-      vscode.window.showErrorMessage(`QaaS: could not read the calibration set: ${(e as Error).message}`);
+      showError(`QaaS: could not read the calibration set: ${(e as Error).message}`);
     }
   }
 
@@ -778,7 +779,7 @@ export class OperatorCommands {
     try {
       code = await this.code(node.entry, cal);
     } catch (e) {
-      vscode.window.showErrorMessage(`QaaS: ${(e as Error).message}`);
+      showError(`QaaS: ${(e as Error).message}`);
       return;
     }
     const editor = vscode.window.activeTextEditor;
@@ -809,11 +810,14 @@ export class OperatorCommands {
     if (!qubit) {
       return;
     }
+    const billing = billingModel(backendName());
     const ok = await vscode.window.showInformationMessage(
       `Create a Rabi calibration notebook for ${spec.name} on ${qubit}?`,
       {
         modal: true,
-        detail: `Running it submits 7 pulse-level jobs, estimated billed time up to ${formatSeconds(calibrationCost())}. The result is offered for saving into the operator file.`,
+        detail: `Running it submits 7 pulse-level jobs${
+          billing ? `, estimated billed time up to ${formatSeconds(calibrationCost(billing))}` : ""
+        }. The result is offered for saving into the operator file.`,
       },
       "Create Notebook",
     );
@@ -824,7 +828,7 @@ export class OperatorCommands {
     try {
       code = await this.code(node.entry, cal?.calibrationSetId === info?.calibrationSetId ? cal : undefined);
     } catch (e) {
-      vscode.window.showErrorMessage(`QaaS: ${(e as Error).message}`);
+      showError(`QaaS: ${(e as Error).message}`);
       return;
     }
     const t = await currentTarget(this.secrets);
@@ -837,6 +841,7 @@ export class OperatorCommands {
       qubit,
       resultDirectory: vscode.Uri.joinPath(root, ".qaas", "calibrations").fsPath,
       instance: t.instance,
+      billing,
     });
     const uri = vscode.Uri.joinPath(root, ".qaas", "notebooks", `${spec.name}_rabi_${sanitize(qubit)}.ipynb`);
     await vscode.workspace.fs.writeFile(uri, Buffer.from(nb, "utf8"));

@@ -28,12 +28,12 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any
 
-MIN_QAAS = (1, 0, 0)
+MIN_QAAS = (1, 1, 0)  # the version the extension is built and tested with (environments.ts)
 MIN_PYTHON = (3, 12)
 # The bridge must start on any Python 3.8+ to report an unsuitable interpreter; datetime.UTC needs 3.11.
 UTC = timezone.utc
 MAX_SIM_QUBITS = 24
-TERMINAL_STATES = {"FINISHED", "FAILED", "CANCELED", "CANCELLED"}
+TERMINAL_STATES = {"FINISHED", "FAILED", "CANCELED", "CANCELLED", "DELETED"}
 
 
 class BridgeError(Exception):
@@ -48,13 +48,35 @@ class SignInRequired(BridgeError):
     kind = "SignInRequired"
 
 
+class CancelRefused(BridgeError):
+    """HEAppE refused to cancel a job; ``state`` is the job's state when HEAppE names it."""
+
+    kind = "CancelRefused"
+
+    def __init__(self, message: str, state: str | None = None):
+        super().__init__(message)
+        self.state = state
+
+
 class EnvironmentProblem(BridgeError):
     """The interpreter cannot run qaas (wrong Python version or missing packages)."""
 
     kind = "Environment"
 
 
+# Running in Pyodide (the extension's WebAssembly runtime).
+WASM = sys.platform == "emscripten"
 QAAS_MODULES = ("qheappe_client", "qaas", "qiskit", "iqm", "py4lexis", "py4heappe")
+
+
+def _pyodide_label() -> str:
+    """Name of the WebAssembly runtime, used where the interpreter path is shown."""
+    try:
+        import pyodide
+
+        return f"Pyodide {pyodide.__version__} (WebAssembly, bundled with the extension)"
+    except Exception:
+        return "Pyodide (WebAssembly, bundled with the extension)"
 
 
 def _environment_problem() -> EnvironmentProblem | None:
@@ -75,7 +97,7 @@ def _version(dist: str) -> str | None:
 
 
 def _is_outdated(version: str | None) -> bool:
-    """True for qaas older than 1.0.0, including pre-releases such as 1.0.0a1."""
+    """True for qaas older than MIN_QAAS, including its pre-releases such as 1.1.0a1."""
     if version is None:
         return False
     match = re.match(r"(\d+(?:\.\d+)*)(.*)", version)
@@ -85,6 +107,27 @@ def _is_outdated(version: str | None) -> bool:
     release += (0,) * (3 - len(release))
     pre = bool(re.match(r"\.?(a|b|rc|dev)", match.group(2)))
     return release < MIN_QAAS or (release == MIN_QAAS and pre)
+
+
+# HEAppE job states qaas's HEAppEJobState does not name. 256 is final: HEAppE calls it "Deleted"
+# (e.g. "Cannot cancel job '3751', this job is in state 'Deleted'"); failed jobs can end there too.
+EXTRA_JOB_STATES = {256: "DELETED"}
+
+
+def _job_state(value: Any) -> str:
+    """Readable HEAppE job state (FINISHED, RUNNING, ...), including the ones qaas does not know."""
+    from qheappe_client.utils import HEAppEJobState
+
+    if isinstance(value, int) and value in EXTRA_JOB_STATES:
+        return EXTRA_JOB_STATES[value]
+    return HEAppEJobState.readable(value)
+
+
+def _heappe_detail(text: str) -> str:
+    """HEAppE's own message from an error such as '... -> HTTP 400: {"title": ..., "detail": "..."}'."""
+    match = re.search(r'"detail"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
+    detail = json.loads(f'"{match.group(1)}"') if match else text
+    return re.sub(r"\s*\(Request ID: \w+\)\.?$", "", detail).strip()
 
 
 def _forbidden(job_id: Any, exc: Exception) -> BridgeError | None:
@@ -161,9 +204,77 @@ def _job_resource(tasks: list) -> str | None:
     return None
 
 
+def _parse_error(exc: BaseException) -> str:
+    """Readable OpenQASM 3 parse error with its position.
+
+    The openqasm3 parser stops at the first syntax error with an empty QASM3ParsingError ("parse
+    failed" in some versions); the ANTLR exception it wraps knows the offending token. The editor
+    reads "line N, column M" from the message."""
+    text = str(exc).strip()
+    seen: set[int] = set()
+    todo: list = [exc]
+    while todo:
+        e = todo.pop()
+        if e is None or id(e) in seen:
+            continue
+        seen.add(id(e))
+        token = getattr(e, "offendingToken", None)
+        if token is not None and getattr(token, "line", None) is not None:
+            got = getattr(token, "text", None)
+            where = f"line {token.line}, column {token.column}"
+            unexpected = "unexpected end of file" if got in (None, "<EOF>") else f"unexpected {got!r}"
+            return f"{where}: {unexpected}" + (f" ({text})" if text and text != "parse failed" else "")
+        todo += [e.__cause__, e.__context__, *(a for a in getattr(e, "args", ()) if isinstance(a, BaseException))]
+    return text or type(exc).__name__
+
+
+_GATE_CALL = re.compile(r"^\s*move\b", re.M)
+_GATE_DEF = re.compile(r"^\s*gate\s+move\b", re.M)
+_HEADER = re.compile(r"^\s*(include\s+\"[^\"]*\"\s*;|OPENQASM\s+[\d.]+\s*;)[^\n]*$", re.M)
+
+
+def _load_qasm(source: str):
+    """OpenQASM 3 -> QuantumCircuit, also for IQM-native programs (e.g. a transpiled export).
+
+    Qiskit's importer only knows stdgates.inc: IQM's ``move`` (qubit <-> resonator, e.g. on VLQ) is undefined
+    there, so a program calling it fails with "gate 'move' is not defined". Until qaas handles it,
+    an empty placeholder definition is added (on the include/OPENQASM line, so error line numbers
+    stay right) and the placeholders are then replaced by IQM's MoveGate; ``r`` gates defined by an
+    export become Qiskit's RGate again, IQM's native gate."""
+    from qiskit import qasm3
+
+    text = source
+    if _GATE_CALL.search(source) and not _GATE_DEF.search(source):
+        stub = " gate move _qaas_a, _qaas_b {}"
+        headers = list(_HEADER.finditer(source))
+        if headers:
+            end = headers[-1].end()
+            text = source[:end] + stub + source[end:]
+        else:
+            text = stub.strip() + " " + source
+    return _native_gates(qasm3.loads(text))
+
+
+def _native_gates(circuit):
+    """Replace the ``move`` placeholders and exported ``r`` definitions by IQM's / Qiskit's gates."""
+    from qiskit.circuit.library import RGate
+
+    try:
+        from iqm.qiskit_iqm.move_gate import MoveGate
+    except ImportError:
+        MoveGate = None
+    for index, inst in enumerate(circuit.data):
+        op = inst.operation
+        if op.name == "move" and MoveGate is not None and op.num_qubits == 2 and not op.params:
+            circuit.data[index] = inst.replace(operation=MoveGate())
+        elif op.name == "r" and op.num_qubits == 1 and len(op.params) == 2 and not isinstance(op, RGate):
+            circuit.data[index] = inst.replace(operation=RGate(*op.params))
+    return circuit
+
+
 def _dumps_qasm3(circuit) -> str:
     """OpenQASM 3 text of a transpiled circuit. Native gates without a Qiskit definition
-    (IQM's ``move`` on VLQ's resonator) are declared as basis gates instead of failing."""
+    (IQM's ``move`` to a resonator) are declared as basis gates instead of failing."""
     from qiskit import qasm3
 
     builtin = {"measure", "barrier", "reset", "delay"}
@@ -484,10 +595,11 @@ class Server:
         self._pullas.clear()
         return True
 
-    def _job(self, p: dict):
+    def _job(self, p: dict, memory: bool = False):
         from qheappe_client.qiskit.qbackend import QJob
 
-        return QJob(self._backend(p), heappe_job_id=int(p["jobId"]), shots=p.get("shots"))
+        # qaas >= 1.1: per-shot results are a property of the job (memory=True), result() takes no arguments.
+        return QJob(self._backend(p), heappe_job_id=int(p["jobId"]), shots=p.get("shots"), memory=memory)
 
     # --- methods ----------------------------------------------------------
 
@@ -497,9 +609,10 @@ class Server:
             names.remove("py4lexis")  # not used: IT4I Workflows signs in
         packages = {name: _version(name) for name in names}
         data = {
+            "runtime": "wasm" if WASM else "python",
             "pythonOk": sys.version_info >= MIN_PYTHON,
             "python": sys.version.split()[0],
-            "executable": sys.executable,
+            "executable": _pyodide_label() if WASM else sys.executable,
             "packages": packages,
             "qaasOutdated": _is_outdated(packages["qaas"]),
         }
@@ -537,12 +650,11 @@ class Server:
 
     def analyze(self, p: dict) -> dict:
         """Parse OpenQASM 3; with transpile=True also transpile for the backend."""
-        from qiskit import qasm3
 
         try:
-            qc = qasm3.loads(p["source"])
+            qc = _load_qasm(p["source"])
         except Exception as exc:
-            raise BridgeError(f"OpenQASM 3 parse error: {exc}") from exc
+            raise BridgeError(f"OpenQASM 3 parse error: {_parse_error(exc)}") from exc
         out: dict[str, Any] = {"original": _circuit_stats(qc)}
         if p.get("transpile"):
             backend = self._backend(p)
@@ -556,15 +668,14 @@ class Server:
         return out
 
     def submit(self, p: dict) -> dict:
-        from qiskit import qasm3
 
         sources = p["sources"]
         circuits = []
         for src in sources:
             try:
-                circuits.append(qasm3.loads(src))
+                circuits.append(_load_qasm(src))
             except Exception as exc:
-                raise BridgeError(f"OpenQASM 3 parse error: {exc}") from exc
+                raise BridgeError(f"OpenQASM 3 parse error: {_parse_error(exc)}") from exc
         backend = self._backend(p)
         transpiled = backend.transpile(circuits)
         shots = int(p["shots"])
@@ -578,7 +689,6 @@ class Server:
         }
 
     def jobInfo(self, p: dict) -> dict:
-        from qheappe_client.utils import HEAppEJobState
 
         try:
             info = self._backend(p)._qclient.get_job_info(int(p["jobId"]))
@@ -587,7 +697,7 @@ class Server:
                 raise problem from exc
             raise
         return {
-            "state": HEAppEJobState.readable(info.get("State", -1)),
+            "state": _job_state(info.get("State", -1)),
             "name": info.get("Name"),
             "tasks": len(info.get("Tasks") or []),
         }
@@ -615,7 +725,6 @@ class Server:
         ListJobsForCurrentUser returns every user's jobs when the user is a Manager or Administrator
         in any HEAppE group, but only the submitter (or a project Administrator) can read them. Own
         jobs are those returned with ``UserId`` = the signed-in HEAppE user."""
-        from qheappe_client.utils import HEAppEJobState
 
         qclient = self._backend(p)._qclient
         api = qclient.job_management_api
@@ -640,7 +749,7 @@ class Server:
             jobs[job_id] = {
                 "jobId": job_id,
                 "name": _field(d, "name", "Name"),
-                "state": HEAppEJobState.readable(state if state is not None else -1),
+                "state": _job_state(state if state is not None else -1),
                 "createdAt": _field(d, "creation_time", "CreationTime") or _field(d, "submit_time", "SubmitTime"),
                 "tasks": len(tasks),
                 "resource": _job_resource(tasks),
@@ -654,14 +763,35 @@ class Server:
         # QJob.cancel() in qaas 1.0.0 calls the coroutine QClient.cancel_job without awaiting it,
         # so the request is never sent. Run it on the client's loop instead.
         import inspect
+        import logging
 
         qclient = self._backend(p)._qclient
-        result = qclient.cancel_job(int(p["jobId"]))
-        if inspect.iscoroutine(result):
-            result = qclient._run(result)
+        # qaas logs HEAppE's refusal and returns False; keep the logged reason for the user.
+        errors: list[str] = []
+        handler = logging.Handler(logging.ERROR)
+        handler.emit = lambda record: errors.append(record.getMessage())  # type: ignore[method-assign]
+        # qheappe_client.qclient builds its logger from the Logger class, outside the logging
+        # hierarchy (nothing propagates to "qheappe_client"): attach to that object itself.
+        loggers = {logging.getLogger("qheappe_client")}
+        module_log = getattr(sys.modules.get("qheappe_client.qclient"), "log", None)
+        if isinstance(module_log, logging.Logger):
+            loggers.add(module_log)
+        for logger in loggers:
+            logger.addHandler(handler)
+        try:
+            result = qclient.cancel_job(int(p["jobId"]))
+            if inspect.iscoroutine(result):
+                result = qclient._run(result)
+        finally:
+            for logger in loggers:
+                logger.removeHandler(handler)
         if result is False:
-            raise BridgeError(
-                f"HEAppE did not accept cancelling job {p['jobId']}; the reason is in the QaaS output channel."
+            reason = _heappe_detail(errors[-1]) if errors else ""
+            state = re.search(r"in state '(\w+)'", reason)
+            raise CancelRefused(
+                f"HEAppE did not accept cancelling job {p['jobId']}"
+                + (f": {reason}" if reason else "; the reason is in the QaaS output channel."),
+                state.group(1).upper() if state else None,
             )
         return True
 
@@ -670,10 +800,10 @@ class Server:
         state = self.jobInfo(p)["state"]
         if state != "FINISHED":
             raise BridgeError(f"Job {p['jobId']} is {state}; results are available once it is FINISHED.")
-        job = self._job(p)
         with_meas = bool(p.get("withMeasurements"))
+        job = self._job(p, memory=with_meas)
         try:
-            result = job.result(qiskit_legacy=True, with_measurements=with_meas)
+            result = job.result()
         except Exception as exc:
             if problem := _forbidden(p["jobId"], exc):
                 raise problem from exc
@@ -697,15 +827,15 @@ class Server:
         Supports unitary circuits with final measurements. Keys use Qiskit bit order
         (rightmost = classical bit 0); unmeasured classical bits are 0.
         """
-        from qiskit import QuantumCircuit, qasm3
+        from qiskit import QuantumCircuit
         from qiskit.quantum_info import Statevector
 
         out = []
         for index, src in enumerate(p["sources"]):
             try:
-                qc = qasm3.loads(src)
+                qc = _load_qasm(src)
             except Exception as exc:
-                raise BridgeError(f"Circuit {index}: OpenQASM 3 parse error: {exc}") from exc
+                raise BridgeError(f"Circuit {index}: OpenQASM 3 parse error: {_parse_error(exc)}") from exc
             if qc.num_qubits > MAX_SIM_QUBITS:
                 raise BridgeError(
                     f"Circuit {index} has {qc.num_qubits} qubits; ideal simulation is limited to {MAX_SIM_QUBITS}."
@@ -831,14 +961,13 @@ class Server:
     def _compile_pulse(self, p: dict):
         """Compile OpenQASM 3 circuits with catalog operators. Returns (pulla, run_definition, context, n)."""
         import qaas_pulse
-        from qiskit import qasm3
 
         circuits_q = []
         for index, src in enumerate(p.get("sources") or []):
             try:
-                circuits_q.append(qasm3.loads(src))
+                circuits_q.append(_load_qasm(src))
             except Exception as exc:
-                raise BridgeError(f"Circuit {index}: OpenQASM 3 parse error: {exc}") from exc
+                raise BridgeError(f"Circuit {index}: OpenQASM 3 parse error: {_parse_error(exc)}") from exc
         if not circuits_q:
             raise BridgeError("No OpenQASM 3 sources for this pulse job.")
         operators, use = p.get("operators") or [], p.get("use") or {}
@@ -1011,6 +1140,42 @@ def _close_heappe_clients() -> None:
                     obj.pool.join()
 
 
+def handle(server: Server, line: str) -> str | None:
+    """Answer one JSON request line; None for a blank line. Shared by `serve` and the
+    WebAssembly runtime, which calls it from a Node worker thread instead of a pipe."""
+    line = line.strip()
+    if not line:
+        return None
+    req_id = None
+    try:
+        req = json.loads(line)
+        req_id = req.get("id")
+        method = req.get("method", "")
+        if method.startswith("_") or not callable(getattr(server, method, None)):
+            raise BridgeError(f"Unknown method: {method}")
+        if method != "check" and (problem := _environment_problem()):
+            raise problem
+        try:
+            result = getattr(server, method)(req.get("params") or {})
+        except ModuleNotFoundError as exc:
+            if (exc.name or "").split(".")[0] not in QAAS_MODULES:
+                raise
+            raise EnvironmentProblem(
+                f"{exc.name} is not installed in {sys.executable}. Install qaas into this environment "
+                "or select another interpreter."
+            ) from exc
+        response = {"id": req_id, "result": result}
+    except BridgeError as exc:
+        error = {"type": exc.kind, "message": str(exc)}
+        if getattr(exc, "state", None):
+            error["state"] = exc.state  # CancelRefused: the job's state as HEAppE names it
+        response = {"id": req_id, "error": error}
+    except Exception as exc:
+        traceback.print_exc(file=sys.stderr)
+        response = {"id": req_id, "error": {"type": type(exc).__name__, "message": str(exc)}}
+    return json.dumps(response, default=str)
+
+
 def serve() -> int:
     proto_in = os.fdopen(os.dup(0), "r", encoding="utf-8")
     proto_out = os.fdopen(os.dup(1), "w", encoding="utf-8", buffering=1)
@@ -1020,34 +1185,9 @@ def serve() -> int:
 
     server = Server()
     for line in proto_in:
-        line = line.strip()
-        if not line:
-            continue
-        req_id = None
-        try:
-            req = json.loads(line)
-            req_id = req.get("id")
-            method = req.get("method", "")
-            if method.startswith("_") or not callable(getattr(server, method, None)):
-                raise BridgeError(f"Unknown method: {method}")
-            if method != "check" and (problem := _environment_problem()):
-                raise problem
-            try:
-                result = getattr(server, method)(req.get("params") or {})
-            except ModuleNotFoundError as exc:
-                if (exc.name or "").split(".")[0] not in QAAS_MODULES:
-                    raise
-                raise EnvironmentProblem(
-                    f"{exc.name} is not installed in {sys.executable}. Install qaas into this environment "
-                    "or select another interpreter."
-                ) from exc
-            response = {"id": req_id, "result": result}
-        except BridgeError as exc:
-            response = {"id": req_id, "error": {"type": exc.kind, "message": str(exc)}}
-        except Exception as exc:
-            traceback.print_exc(file=sys.stderr)
-            response = {"id": req_id, "error": {"type": type(exc).__name__, "message": str(exc)}}
-        proto_out.write(json.dumps(response, default=str) + "\n")
+        response = handle(server, line)
+        if response is not None:
+            proto_out.write(response + "\n")
     _close_heappe_clients()
     return 0
 

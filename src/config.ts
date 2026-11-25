@@ -89,7 +89,8 @@ export async function currentTarget(secrets: vscode.SecretStorage): Promise<Targ
   return {
     project: lexisProject(dev),
     resource: dev.QAAS_LEXIS_RESOURCE || cfg().get<string>("lexisResource") || "",
-    backend: dev.QAAS_BACKEND_NAME || cfg().get<string>("backendName") || "VLQ",
+    // Empty: qaas picks the backend of the LEXIS resource.
+    backend: configuredBackend(dev) ?? "",
     token: await lexisToken(secrets, instance, dev),
     instance,
   };
@@ -97,7 +98,10 @@ export async function currentTarget(secrets: vscode.SecretStorage): Promise<Targ
 
 /** Environment variables for scripts and notebooks run against the current target. */
 export function targetEnv(t: Target): Record<string, string> {
-  const env: Record<string, string> = { LEXIS_PROJECT: t.project, LEXIS_RESOURCE: t.resource, QAAS_BACKEND: t.backend };
+  const env: Record<string, string> = { LEXIS_PROJECT: t.project, LEXIS_RESOURCE: t.resource };
+  if (t.backend) {
+    env.QAAS_BACKEND = t.backend;
+  }
   if (t.token) {
     env.LEXIS_TOKEN = t.token;
   }
@@ -152,4 +156,54 @@ export function expandPath(template: string, vars: Record<string, string>): stri
     out = path.join(os.homedir(), out.slice(1));
   }
   return path.resolve(out);
+}
+
+// --------------------------------------------------------------------------------- backend
+
+/** `qaas.backendName` or the dev file's QAAS_BACKEND_NAME; undefined: the LEXIS resource's backend. */
+export function configuredBackend(dev = devOverrides()): string | undefined {
+  return dev.QAAS_BACKEND_NAME || cfg().get<string>("backendName") || undefined;
+}
+
+/** The remembered backend belongs to one LEXIS project and resource. */
+function backendKey(dev = devOverrides()): string {
+  const resource = dev.QAAS_LEXIS_RESOURCE || cfg().get<string>("lexisResource") || "";
+  return `qaas.lastBackend:${lexisInstance(dev)?.apiUrl ?? ""}|${lexisProject(dev)}|${resource}`;
+}
+let backendMemory: vscode.Memento | undefined;
+const backendChanged = new vscode.EventEmitter<void>();
+/** Fires when the backend in use (configured or reported by LEXIS) may have changed. */
+export const onDidChangeBackend = backendChanged.event;
+
+export function initBackendMemory(memory: vscode.Memento): vscode.Disposable {
+  backendMemory = memory;
+  return vscode.workspace.onDidChangeConfiguration((e) => {
+    if (["qaas.backendName", "qaas.lexisProject", "qaas.lexisResource"].some((k) => e.affectsConfiguration(k))) {
+      backendChanged.fire();
+    }
+  });
+}
+
+/** Remember the backend LEXIS reported for the resource (when none is configured). */
+export function rememberBackend(name: string | undefined): void {
+  const key = backendKey();
+  if (name && backendMemory && backendMemory.get(key) !== name) {
+    void backendMemory.update(key, name);
+    backendChanged.fire();
+  }
+}
+
+/** Name of the backend in use: configured, else the one LEXIS last reported; undefined if unknown. */
+export function backendName(): string | undefined {
+  return configuredBackend() ?? backendMemory?.get<string>(backendKey());
+}
+
+/** Backend name to key stored jobs and calibration sets by: the target's, else the one in use. */
+export function backendKeyName(t: Target): string {
+  return t.backend || backendName() || "";
+}
+
+/** For messages: the backend's name, or "the QPU" while it is not known yet. */
+export function backendLabel(): string {
+  return backendName() ?? "the QPU";
 }

@@ -1,9 +1,12 @@
-"""Bell-state circuit on VLQ via qaas (QHEAppE).
+"""Bell-state circuit on the QPU of your LEXIS project's resource, via qaas (QHEAppE).
 
-Run with "QaaS: Run Current File on VLQ" or plain `python`.
+Run with "QaaS: Run Python File on QPU": it runs in the WebAssembly runtime bundled with QaaS,
+no local Python needed ("QaaS: Show Bundled Python Libraries" lists what you can import), or with
+your local Python when the script needs something else. Plain `python` works too.
 LEXIS_PROJECT / LEXIS_RESOURCE / QAAS_BACKEND / LEXIS_TOKEN are read from the environment,
 and PY4LEXIS_AAI_URL / PY4LEXIS_API_URL when a test LEXIS instance is configured.
-Without LEXIS_TOKEN, a browser login opens. A refresh token is exchanged for an access token.
+Without LEXIS_TOKEN, the LEXIS browser login starts. A refresh token is exchanged for an access token.
+Simulate locally with qiskit.primitives.StatevectorSampler; plt.show() opens plots in VS Code.
 """
 
 import os
@@ -35,11 +38,11 @@ provider = QProvider(
 )
 backend = provider.get_backend(
     lexis_resource=os.environ.get("LEXIS_RESOURCE") or None,
-    backend_name=os.environ.get("QAAS_BACKEND", "VLQ"),
+    backend_name=os.environ.get("QAAS_BACKEND") or None,  # None: the resource's backend
 )
 
 job = backend.run(backend.transpile(qc), shots=1024, job_name="vscode_bell_state")
 print(f"Job submitted: {job.job_id()}")
 
 result = job.result()
-print("Counts:", result[0].data.meas.get_counts())
+print("Counts:", result.get_counts())  # qiskit Result (qaas >= 1.1); per-shot: backend.run(..., memory=True)

@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>qaas in the browser (Pyodide / WebAssembly)</title>
+<style>
+  :root { color-scheme: light dark; --bg:#fbfbfa; --fg:#1d1d1f; --muted:#6b6b70; --line:#dcdcdf; --accent:#2f5bd3; --code:#f2f2f0; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#161618; --fg:#ececee; --muted:#9a9aa0; --line:#2e2e33; --accent:#8aa8ff; --code:#1f1f23; } }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 920px; margin: 0 auto; padding: 32px 20px 64px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  p.sub { color: var(--muted); margin: 0 0 24px; }
+  #status { font-family: ui-monospace, monospace; font-size: 13px; color: var(--muted); margin-bottom: 12px; }
+  textarea { width: 100%; box-sizing: border-box; min-height: 260px; font: 13px/1.45 ui-monospace, Menlo, monospace;
+             background: var(--code); color: var(--fg); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+  button { font: inherit; padding: 7px 16px; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
+  button:disabled { opacity: .45; cursor: default; }
+  pre#out { background: var(--code); border: 1px solid var(--line); border-radius: 8px; padding: 12px; min-height: 80px;
+            white-space: pre-wrap; font: 13px/1.45 ui-monospace, Menlo, monospace; }
+  .row { display: flex; gap: 10px; align-items: center; margin: 10px 0; }
+  .muted { color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>qaas in the browser</h1>
+  <p class="sub" id="sub">Qiskit compiled to WebAssembly, qheappe_client and the IQM stack running on Pyodide.</p>
+  <div id="status">Starting ...</div>
+  <textarea id="code" spellcheck="false">import qiskit, qheappe_client, qaas_pyodide
+from qiskit import QuantumCircuit, transpile
+from qiskit.qasm3 import dumps
+from qiskit.quantum_info import Statevector
+from qiskit.transpiler import CouplingMap
+
+print("qiskit", qiskit.__version__, "| sync API (JSPI):", qaas_pyodide.sync_api_available())
+
+qc = QuantumCircuit(3)
+qc.h(0); qc.cx(0, 1); qc.cx(1, 2)
+print("GHZ probabilities:", {k: round(float(v), 3) for k, v in Statevector(qc).probabilities_dict().items()})
+
+qc.measure_all()
+t = transpile(qc, basis_gates=["r", "cz"], coupling_map=CouplingMap.from_line(5),
+              optimization_level=3, seed_transpiler=7)
+print("Transpiled for IQM-style r/cz line:", dict(t.count_ops()), "depth", t.depth())
+print(dumps(t)[:400])
+
+# Remote execution through LEXIS/HEAppE (needs a LEXIS access token and CORS
+# permitted for this page's origin by the LEXIS/HEAppE endpoints):
+#
+# from qheappe_client import QProvider
+# provider = QProvider("your_project", token=TOKEN)
+# backend = provider.get_backend(lexis_resource="your_resource", backend_name="VLQ")
+# job = backend.run(backend.transpile(qc), shots=1024)
+# print(job.result().get_counts())
+</textarea>
+  <div class="row"><button id="run" type="button" disabled>Run</button><span class="muted">Ctrl/Cmd + Enter</span></div>
+  <pre id="out"></pre>
+</main>
+<script type="module">
+  import { loadQaas } from "./qaas-loader.mjs";
+
+  const $ = (id) => document.getElementById(id);
+  const out = $("out");
+  const params = new URLSearchParams(location.search);
+  const t0 = performance.now();
+  let pyodide;
+  try {
+    pyodide = await loadQaas({
+      indexURL: params.get("pyodide") ?? undefined,
+      onStatus: (s) => ($("status").textContent = s),
+    });
+    pyodide.setStdout({ batched: (s) => (out.textContent += `${s}\n`) });
+    pyodide.setStderr({ batched: (s) => (out.textContent += `${s}\n`) });
+    const m = pyodide.qaasManifest;
+    $("sub").textContent = `qaas ${m.qaas_version} with its IQM stack on Pyodide ${m.pyodide_version} (Python ${m.python_version ?? "?"}).`;
+    $("status").textContent = `Ready in ${((performance.now() - t0) / 1000).toFixed(1)} s`;
+    $("run").disabled = false;
+    window.qaasReady = true;
+  } catch (e) {
+    $("status").textContent = `Load failed: ${e}`;
+    window.qaasError = String(e);
+  }
+  async function run() {
+    $("run").disabled = true; out.textContent = "";
+    try { await pyodide.runPythonAsync($("code").value); }
+    catch (e) { out.textContent += String(e); }
+    finally { $("run").disabled = false; window.qaasRunDone = true; }
+  }
+  $("run").onclick = run;
+  $("code").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) run(); });
+</script>
+</body>
+</html>
